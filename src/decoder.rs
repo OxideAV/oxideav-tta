@@ -433,10 +433,10 @@ impl ChannelState {
 
     /// Stage A standalone for testability.
     pub fn stage_a(&mut self, residual: i32, filter_shift: u32) -> i32 {
-        // Sign-LMS weight update. Driven by the **previous** error.
+        // Sign-LMS weight update. Driven by the **previous** error
+        // (= previous-iteration's residual). Convention: positive
+        // error pushes weights along dx[], negative against.
         if self.error != 0 {
-            // Encoder/decoder must agree on sign convention:
-            // negative error pushes weights against dx[], positive with.
             if self.error < 0 {
                 for i in 0..8 {
                     self.qm[i] = self.qm[i].wrapping_sub(self.dx[i]);
@@ -457,27 +457,41 @@ impl ChannelState {
         let pred = (acc >> filter_shift) as i32;
 
         let after_a = residual.wrapping_add(pred);
-        // Save for the next iteration's update.
+        // Save for the next iteration's LMS update.
         self.error = residual;
 
-        // Shift dx[] and dl[] one step left (i.e. drop index 0).
+        // Shift dx[] and dl[] one step left (drop index 0). After this
+        // shift, positions 4..=7 still hold values from the *previous*
+        // iteration (specifically: shifted-in copies of the prior
+        // dl[5..=7] / dx[5..=7]). dl[7] is unchanged by the shift loop;
+        // it will be overwritten by the regen step below.
         for i in 0..7 {
             self.dx[i] = self.dx[i + 1];
             self.dl[i] = self.dl[i + 1];
         }
 
-        // Regenerate the top entries (indices 4..=7) of dl[] from a
-        // 4-deep "telescoping difference" pattern that ends in the
-        // newly-reconstructed sample. The pattern places the freshly
-        // reconstructed sample at dl[4] and successive backward
-        // differences into dl[5..=7]. (Empirically this orientation
-        // recovers the encoder's prediction exactly on a 1 kHz sine
-        // probe — see `tests/inspect.rs`.)
-        //
-        //   dl[4] = after_a                              (zeroth-order)
-        //   dl[5] = after_a - prev1                      (first-order)
-        //   dl[6] = (after_a - prev1) - (prev1 - prev2)  (second-order)
-        //   dl[7] = third-order difference
+        // -----------------------------------------------------------
+        // Stage-A state regeneration (round-2 calibration: dx[] is
+        // sourced from the *shifted-in* dl[] values BEFORE the dl[4..=7]
+        // regen overwrites them, NOT from the freshly regenerated dl[]).
+        // This matches the encoder's "gradient regenerated against
+        // history just-rolled-down from positions 5..=7" ordering.
+        // -----------------------------------------------------------
+
+        // dx[4..=7]: position-dependent ±{1, 2, 2, 4} step carrying the
+        // sign of the *shifted-in* dl[i] entry. The encoder mirrors
+        // this exactly so the LMS gradient direction matches.
+        self.dx[7] = branchless_sign(self.dl[7], 4);
+        self.dx[6] = branchless_sign(self.dl[6], 2);
+        self.dx[5] = branchless_sign(self.dl[5], 2);
+        self.dx[4] = branchless_sign(self.dl[4], 1);
+
+        // Regenerate dl[4..=7] from a 4-deep telescoping difference
+        // pattern ending in the freshly-reconstructed sample.
+        //   dl[7] = after_a                              (zeroth-order)
+        //   dl[6] = after_a - prev1                      (first-order)
+        //   dl[5] = (after_a - prev1) - (prev1 - prev2)  (second-order)
+        //   dl[4] = third-order telescoping difference
         let p0 = after_a;
         let p1 = self.last_samples[0];
         let p2 = self.last_samples[1];
@@ -493,15 +507,9 @@ impl ChannelState {
         self.dl[5] = dd1;
         self.dl[4] = ddd;
 
-        // dx[4..8]: position-dependent magnitudes 1, 2, 2, 4 carrying
-        // the sign of the corresponding dl[] entry just written, used
-        // by the *next* iteration's sign-LMS update.
-        self.dx[7] = branchless_sign(p0, 4);
-        self.dx[6] = branchless_sign(d1, 2);
-        self.dx[5] = branchless_sign(dd1, 2);
-        self.dx[4] = branchless_sign(ddd, 1);
-
-        // Roll the per-channel sample history.
+        // Roll the per-channel sample history (after_a values, not the
+        // post-Stage-B reconstructed sample — Stage A's filter operates
+        // entirely on its own intermediate output).
         self.last_samples[2] = self.last_samples[1];
         self.last_samples[1] = self.last_samples[0];
         self.last_samples[0] = after_a;

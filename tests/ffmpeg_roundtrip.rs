@@ -5,12 +5,18 @@
 //! and assert bit-exact PCM recovery.
 //!
 //! All sine-based tests in this file are `#[ignore]` for now — they
-//! exercise the Stage-A 8-tap LMS adaptive filter, whose exact
-//! coefficient-regeneration / sign-LMS update sequence is still being
-//! tuned (see the "Gaps" section of `README.md`). The bit-exact
-//! lossless round-trip on silence (where the LMS state never adapts
-//! away from zero) is in `tests/silence.rs` and runs by default; an
-//! end-to-end sanity dump for the sine path lives in `tests/inspect.rs`.
+//! exercise the Stage-A 8-tap LMS adaptive filter on signals with
+//! non-trivial residuals. After the round-2 dx[]-orientation
+//! calibration the decoder is bit-exact for the first ~17 samples
+//! of a 440 Hz sine (vs. 3 before) but accumulates a sub-LSB drift
+//! once the LMS coefficient vector saturates around the first
+//! quarter-cycle. The remaining gap is at the integer-rounding
+//! level (off-by-one at sample 17, growing slowly thereafter) and
+//! requires final formula nailing-down still pending in the trace
+//! doc — see the "Gaps" section of `README.md`. The bit-exact
+//! lossless round-trip on silence is in `tests/silence.rs` and runs
+//! by default; an end-to-end sanity dump for the sine path lives in
+//! `tests/inspect.rs`.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -241,19 +247,19 @@ fn run_one(sample_rate: u32, channels: u16, bps: u16, secs: f32) {
     }
 }
 
-#[ignore = "Stage-A LMS filter not yet bit-exact; see README gaps"]
+#[ignore = "Stage-A LMS drift after ~17 samples on non-silence; see README gaps"]
 #[test]
 fn mono_16bit_44100_lossless() {
     run_one(44_100, 1, 16, 0.5);
 }
 
-#[ignore = "Stage-A LMS filter not yet bit-exact; see README gaps"]
+#[ignore = "Stage-A LMS drift after ~17 samples on non-silence; see README gaps"]
 #[test]
 fn stereo_16bit_48000_lossless() {
     run_one(48_000, 2, 16, 0.3);
 }
 
-#[ignore = "Stage-A LMS filter not yet bit-exact; see README gaps"]
+#[ignore = "Stage-A LMS drift after ~17 samples on non-silence; see README gaps"]
 #[test]
 fn mono_8bit_22050_lossless() {
     run_one(22_050, 1, 8, 0.2);

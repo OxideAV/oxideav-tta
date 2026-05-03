@@ -14,7 +14,12 @@ framework but usable standalone.
   - Two-mode adaptive Rice entropy decoder (k0/k1 with `1 << k0`
     escape threshold and per-sample `sum/k` updates).
   - Stage-A 8-tap sign-LMS adaptive filter (per-channel state).
-    First-cut implementation; see the "Gaps" section.
+    Round-2 calibration: `dx[]` gradient is now sourced from the
+    *shifted-in* `dl[]` values BEFORE the per-iteration `dl[4..=7]`
+    regen overwrites them, matching the encoder's gradient ordering.
+    First ~17 samples of a 440 Hz / 16-bit sine reproduce bit-exactly
+    against the ffmpeg-encoded reference; sub-LSB drift follows once
+    the coefficient vector saturates. See the "Gaps" section.
   - Stage-B fixed-order integer predictor (`(prev × ((1<<k)-1)) >> k`,
     `k = 4` for 8-bit, `k = 5` for 16/24-bit).
   - Pairwise inter-channel decorrelation (decoder direction).
@@ -79,23 +84,27 @@ for fr in parsed.frames {
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-## Gaps / round-2 work
+## Gaps / remaining round-2 work
 
-- **Stage-A 8-tap LMS filter is not yet bit-exact** on signals with
-  non-trivial residuals (sines, chirps, real audio). The current
-  implementation produces decoded samples that are *close* to the
-  source but drift away from bit-exactness over time as the LMS
-  weights diverge from the encoder's. The exact `dx[]` magnitude
-  pattern (the spec describes "branch-free ±1/±2/±4 step" without
-  pinning it to a specific position-by-magnitude table) and the
-  precise telescoping pattern of the `dl[]` line buffer
-  ("4-deep telescoping pattern of the current prediction and recent
-  sample differences") need calibration against an authoritative
-  test vector to nail down. Three sine round-trip tests are in
-  `tests/ffmpeg_roundtrip.rs` marked `#[ignore]` so they can be
-  re-enabled once the LMS sequencing is finalised. The
-  `tests/inspect.rs` smoke test prints the first 32 decoded samples
-  side-by-side with the source for tuning iterations.
+- **Stage-A 8-tap LMS filter is now bit-exact for the first ~17
+  samples** of a 440 Hz / 16-bit sine, then accumulates a sub-LSB
+  drift that grows linearly with the signal slope. The dx[]-source
+  ordering (shifted-in dl[] values rather than freshly-regenerated
+  ones) was the dominant fix and lifted the first-divergence point
+  from sample 4 to sample 17, which is roughly the point where the
+  cumulative LMS update saturates against the integer rounding
+  threshold of the predictor's `>> 9` shift. The remaining gap is
+  a single off-by-one at the round-half-up boundary that has not
+  yielded to any of the variations of {dl[]-regen telescoping,
+  dx[] magnitude pattern, LMS update timing, round-bias selection}
+  exercised by `tests/inspect.rs`. The trace doc covers this stage
+  at the conceptual level only ("4-deep telescoping pattern of the
+  current prediction and recent sample differences"); the final
+  formula needs to be added to the doc before the round-3 patch
+  can be made bit-exact. Three sine round-trip tests in
+  `tests/ffmpeg_roundtrip.rs` stay `#[ignore]`'d for now; the
+  silence round-trip in `tests/silence.rs` exercises the full
+  CRC + Rice + Stage-B + decorrelation pipeline and runs by default.
 - **Encoder**: not yet implemented. Round-trip tests use the `ffmpeg`
   binary as a black-box encoder.
 - **`format == 2` (encrypted)**: gated on a 64-bit ECMA-182 password
