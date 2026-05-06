@@ -13,5 +13,16 @@ homepage = "https://github.com/OxideAV/oxideav-tta"
 keywords = ["multimedia", "audio", "tta", "lossless", "pure-rust"]
 categories = ["multimedia::encoding", "multimedia::audio"]
 
+[features]
+default = ["registry"]
+# Wire the crate's `Decoder` impl + `register(ctx)` entry point into
+# `oxideav-core`'s codec registry. Disable for standalone builds that
+# want the decoder without dragging in the framework.
+registry = ["dep:oxideav-core"]
+# Activate the `spec/06-trace-contract.md` debug trace emitter. Build
+# with `--features trace` and set `OXIDEAV_TTA_TRACE_FILE=<path>` at
+# runtime to write a TSV event tape per decoder invocation.
+trace = []
+
 [dependencies]
-oxideav-core = "0.1"
+oxideav-core = { version = "0.1", optional = true }

@@ -53,13 +53,25 @@ fn shl_saturating(shift: u32) -> u32 {
 
 /// Decode one Rice value from `reader` and return the signed residual.
 /// Updates `state` in place per spec §5.
+#[allow(dead_code)] // direct callers vanish under `--features trace`.
 pub fn decode_one(reader: &mut BitReader<'_>, state: &mut RiceState) -> Result<i32> {
+    Ok(decode_one_traced(reader, state)?.residual_signed)
+}
+
+/// Same as [`decode_one`] but returns the side-channel values used by
+/// the spec/06 trace emitter. `RiceTrace.raw_unary` is the unary
+/// prefix count, `mode` is `false` for low-mode and `true` for
+/// high-mode, `k_used` is the `k` applied to the binary tail (= `k0`
+/// for low-mode, `k1` for high-mode), captured **before** any
+/// adaptive update.
+pub fn decode_one_traced(reader: &mut BitReader<'_>, state: &mut RiceState) -> Result<RiceTrace> {
     let u = reader.read_unary()?;
     let (mode_high, k_for_tail, prefix_value) = if u == 0 {
         (false, state.k0, 0u32)
     } else {
         (true, state.k1, u - 1)
     };
+    let k_used = k_for_tail;
 
     let binary_tail = reader.read_bits(k_for_tail)?;
     let mut value = prefix_value
@@ -88,7 +100,31 @@ pub fn decode_one(reader: &mut BitReader<'_>, state: &mut RiceState) -> Result<i
     }
 
     // STEP C — TTA-zigzag de-zigzag (spec §3.5).
-    Ok(dezigzag(value))
+    let residual_signed = dezigzag(value);
+    Ok(RiceTrace {
+        raw_unary: u,
+        mode_high,
+        k_used,
+        residual_signed,
+        k0_post: state.k0,
+        k1_post: state.k1,
+        sum0_post: state.sum0,
+        sum1_post: state.sum1,
+    })
+}
+
+/// Side-channel return of [`decode_one_traced`] — the values
+/// populating spec/06's `RICE_DECODE` and `RICE_K_UPDATE` events.
+#[allow(dead_code)] // many fields only referenced by the trace emitter (cfg-gated).
+pub struct RiceTrace {
+    pub raw_unary: u32,
+    pub mode_high: bool,
+    pub k_used: u32,
+    pub residual_signed: i32,
+    pub k0_post: u32,
+    pub k1_post: u32,
+    pub sum0_post: u32,
+    pub sum1_post: u32,
 }
 
 /// TTA-flavoured zigzag (odd → positive, even → non-positive).

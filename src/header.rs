@@ -121,12 +121,27 @@ pub fn skip_id3v2_prefix(buf: &[u8]) -> Result<usize> {
     Ok(total)
 }
 
-/// Parse and CRC-verify the 22-byte stream header at `buf[..22]`.
+/// Parse and CRC-verify the 22-byte stream header at `buf[..22]`,
+/// rejecting any `format` other than `1` (the round-1 contract).
 ///
 /// Returns the parsed header on success, the byte offset advanced past
 /// the header (always `22`), or an [`Error`] if the magic, CRC, or any
 /// validated field is malformed/out-of-scope.
+#[allow(dead_code)] // exercised by header tests; round-2 hot path uses parse_stream_header_any_format.
 pub fn parse_stream_header(buf: &[u8]) -> Result<(StreamHeader, usize)> {
+    let (header, n) = parse_stream_header_any_format(buf)?;
+    if header.format != 1 {
+        return Err(Error::UnsupportedFormat(header.format));
+    }
+    Ok((header, n))
+}
+
+/// Parse and CRC-verify the 22-byte stream header at `buf[..22]`,
+/// accepting both `format == 1` (integer PCM) and `format == 2`
+/// (password-derived qm priming, spec/07). The caller is responsible
+/// for refusing format=2 when no password is supplied. Other formats
+/// (3 IEEE float, ...) are still rejected.
+pub fn parse_stream_header_any_format(buf: &[u8]) -> Result<(StreamHeader, usize)> {
     if buf.len() < HEADER_LEN {
         return Err(Error::Truncated);
     }
@@ -150,7 +165,7 @@ pub fn parse_stream_header(buf: &[u8]) -> Result<(StreamHeader, usize)> {
     let sample_rate = u32::from_le_bytes(buf[10..14].try_into().unwrap());
     let total_samples = u32::from_le_bytes(buf[14..18].try_into().unwrap());
 
-    if format != 1 {
+    if format != 1 && format != 2 {
         return Err(Error::UnsupportedFormat(format));
     }
     if channels == 0 || channels > MAX_NCH {

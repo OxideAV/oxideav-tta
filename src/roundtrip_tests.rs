@@ -23,8 +23,8 @@
 //! - The trace contract in `spec/06-trace-contract.md` (no debug
 //!   instrumentation is wired in this round).
 
-use crate::encoder::encode_to_tta1;
-use crate::{decode, pack_pcm};
+use crate::encoder::{encode_to_tta1, encode_to_tta1_format2};
+use crate::{decode, decode_with_password, pack_pcm};
 
 /// Generate a short integer-PCM sine wave for `n_samples` per channel.
 fn sine(n_samples: usize, channels: u16, sample_rate: u32, freq_hz: f64, amp_i32: i32) -> Vec<i32> {
@@ -186,6 +186,127 @@ fn roundtrip_multi_frame_mono_44100() {
     assert_roundtrip(&samples, 1, 16, 44_100);
 }
 
+/// Verify the spec/06 trace tape's structural properties on a tiny
+/// self-encoded mono fixture: every line parses with `\t`/`=`, the
+/// first event is `FILE_HEADER`, the last is `FRAME_END`, the count
+/// of `STAGE_B_PREDICT` lines equals `nch * total_samples`, the
+/// count of `PCM_OUT` lines equals `total_samples`, and `DECORR_PRE`
+/// is zero on mono (spec/06 §11).
+#[cfg(feature = "trace")]
+#[test]
+fn trace_tape_structural_self_check_mono() {
+    // Use the per-thread override so concurrent tests do not race
+    // against each other on the shared `OXIDEAV_TTA_TRACE_FILE` env
+    // var. The override is thread-local; production users still
+    // hit the env-var contract per spec/06 §2.
+    let tmp = std::env::temp_dir().join("oxideav-tta-trace-mono.tsv");
+    if tmp.exists() {
+        std::fs::remove_file(&tmp).unwrap();
+    }
+    crate::trace::set_thread_trace_path(Some(tmp.clone()));
+
+    let n = 256;
+    let samples = sine(n, 1, 44_100, 440.0, 8_000);
+    let tta = encode_to_tta1(&samples, 1, 16, 44_100);
+    let (_info, _decoded) = decode(&tta).expect("decode should succeed");
+
+    crate::trace::set_thread_trace_path(None);
+
+    let tape = std::fs::read_to_string(&tmp).expect("tape was written");
+    let lines: Vec<&str> = tape.lines().collect();
+    assert!(!lines.is_empty(), "tape must be non-empty");
+    assert!(
+        lines[0].starts_with("ev=FILE_HEADER\t"),
+        "first line must be FILE_HEADER, got: {}",
+        lines[0]
+    );
+    assert!(
+        lines.last().unwrap().starts_with("ev=FRAME_END\t"),
+        "last line must be FRAME_END"
+    );
+    // Every line: split on `\t`, every non-first record split on `=`.
+    for (i, line) in lines.iter().enumerate() {
+        let mut parts = line.split('\t');
+        let head = parts.next().expect("each line carries an ev=...");
+        assert!(
+            head.starts_with("ev="),
+            "line {i} does not start with ev=: {line}"
+        );
+        for p in parts {
+            assert!(
+                p.contains('='),
+                "line {i} has a non `key=value` record `{p}`"
+            );
+        }
+    }
+    let count = |needle: &str| {
+        lines
+            .iter()
+            .filter(|l| l.starts_with(&format!("ev={needle}\t")))
+            .count()
+    };
+    // total_samples = 256, nch = 1.
+    assert_eq!(
+        count("STAGE_B_PREDICT"),
+        n,
+        "STAGE_B_PREDICT count must equal nch * total_samples = {n}"
+    );
+    assert_eq!(
+        count("PCM_OUT"),
+        n,
+        "PCM_OUT count must equal total_samples = {n}"
+    );
+    assert_eq!(
+        count("DECORR_PRE"),
+        0,
+        "DECORR_PRE must be empty on a mono fixture (spec/06 §11)"
+    );
+    assert_eq!(count("DECORR_POST"), 0);
+    assert_eq!(count("FRAME_BEGIN"), 1);
+    assert_eq!(count("FRAME_END"), 1);
+    assert_eq!(count("FILE_HEADER"), 1);
+    assert_eq!(count("HEADER_CRC"), 1);
+    assert_eq!(count("SEEK_TABLE_BEGIN"), 1);
+    assert_eq!(count("SEEK_TABLE_END"), 1);
+    assert_eq!(count("SEEK_ENTRY"), 1, "single-frame fixture → 1 entry");
+    assert_eq!(count("LMS_INIT"), 1);
+    assert_eq!(count("RICE_K_INIT"), 1);
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[cfg(feature = "trace")]
+#[test]
+fn trace_tape_decorr_events_only_on_multichannel() {
+    let tmp = std::env::temp_dir().join("oxideav-tta-trace-stereo.tsv");
+    if tmp.exists() {
+        std::fs::remove_file(&tmp).unwrap();
+    }
+    crate::trace::set_thread_trace_path(Some(tmp.clone()));
+
+    let n = 128;
+    let samples = sine(n, 2, 44_100, 440.0, 6_000);
+    let tta = encode_to_tta1(&samples, 2, 16, 44_100);
+    let (_info, _decoded) = decode(&tta).expect("decode should succeed");
+
+    crate::trace::set_thread_trace_path(None);
+
+    let tape = std::fs::read_to_string(&tmp).expect("tape was written");
+    let count = |needle: &str| {
+        tape.lines()
+            .filter(|l| l.starts_with(&format!("ev={needle}\t")))
+            .count()
+    };
+    assert_eq!(count("DECORR_PRE"), n);
+    assert_eq!(count("DECORR_POST"), n);
+    assert_eq!(count("PCM_OUT"), n);
+    assert_eq!(count("STAGE_B_PREDICT"), 2 * n);
+    assert_eq!(count("LMS_INIT"), 2);
+    assert_eq!(count("RICE_K_INIT"), 2);
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
 #[test]
 fn pcm_pack_round_trip_16bit() {
     let samples: Vec<i32> = vec![0, 1, -1, 32_767, -32_768, 100, -100];
@@ -216,9 +337,10 @@ fn pcm_pack_round_trip_24bit() {
 }
 
 #[test]
-fn header_validation_rejects_unsupported_format() {
+fn header_validation_rejects_format_2_without_password() {
     // Build a header that claims format=2 (encrypted) and verify the
-    // decoder rejects it cleanly.
+    // password-less `decode` entry point surfaces PasswordRequired
+    // (mirror of libtta's TTA_PASSWORD_ERROR per spec/07 §7).
     let mut buf = Vec::new();
     buf.extend_from_slice(b"TTA1");
     buf.extend_from_slice(&2u16.to_le_bytes()); // format
@@ -228,10 +350,69 @@ fn header_validation_rejects_unsupported_format() {
     buf.extend_from_slice(&100u32.to_le_bytes());
     let crc = crate::crc32::crc32(&buf);
     buf.extend_from_slice(&crc.to_le_bytes());
+    assert!(matches!(decode(&buf), Err(crate::Error::PasswordRequired)));
+}
+
+#[test]
+fn header_validation_rejects_unsupported_format() {
+    // Format=3 (IEEE float) is still out of scope.
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"TTA1");
+    buf.extend_from_slice(&3u16.to_le_bytes()); // format
+    buf.extend_from_slice(&1u16.to_le_bytes()); // channels
+    buf.extend_from_slice(&16u16.to_le_bytes()); // bps
+    buf.extend_from_slice(&44_100u32.to_le_bytes());
+    buf.extend_from_slice(&100u32.to_le_bytes());
+    let crc = crate::crc32::crc32(&buf);
+    buf.extend_from_slice(&crc.to_le_bytes());
     assert!(matches!(
         decode(&buf),
-        Err(crate::Error::UnsupportedFormat(2))
+        Err(crate::Error::UnsupportedFormat(3))
     ));
+}
+
+#[test]
+fn roundtrip_format2_password_protected() {
+    // Format=2 (spec/07): the encoder primes Stage-A's qm[] with the
+    // password digest at every per-channel frame init; the
+    // password-aware decoder applies the same priming on read. Round-
+    // trip must be sample-exact.
+    let n = (44_100.0 * 0.05) as usize;
+    let samples = sine(n, 1, 44_100, 440.0, 12_000);
+    let password = b"correct horse battery staple";
+    let tta = encode_to_tta1_format2(&samples, 1, 16, 44_100, password);
+    let (info, decoded) =
+        decode_with_password(&tta, password).expect("password-aware decode should succeed");
+    assert_eq!(info.format, 2);
+    assert_eq!(info.channels, 1);
+    assert_eq!(decoded, samples);
+}
+
+#[test]
+fn format2_without_password_fails_clean() {
+    // The plain `decode` path must surface PasswordRequired for
+    // format=2 streams.
+    let n = 1024;
+    let samples = vec![0i32; n];
+    let tta = encode_to_tta1_format2(&samples, 1, 16, 44_100, b"hunter2");
+    assert!(matches!(decode(&tta), Err(crate::Error::PasswordRequired)));
+}
+
+#[test]
+fn format2_wrong_password_corrupts_decode() {
+    // Wrong password produces wrong qm priming, which produces wrong
+    // PCM. The frame CRC32 still matches (format=2 doesn't
+    // authenticate the password — it's lightweight obfuscation per
+    // spec/07 §11), so the decode succeeds with corrupt audio. We
+    // assert at least one sample diverges from the reference.
+    let n = 1024;
+    let samples = sine(n, 1, 44_100, 440.0, 8_000);
+    let tta = encode_to_tta1_format2(&samples, 1, 16, 44_100, b"correct");
+    let (_, decoded) = decode_with_password(&tta, b"wrong").expect("decode succeeds");
+    assert!(
+        decoded != samples,
+        "wrong password should corrupt PCM (format=2 has no MAC)"
+    );
 }
 
 #[test]

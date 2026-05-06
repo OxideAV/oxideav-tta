@@ -5,9 +5,10 @@ Pure-Rust True Audio (TTA) lossless audio codec for the
 
 ## Status
 
-**Round 1 — clean-room decoder.** Decodes TTA1 format=1 (integer PCM)
-streams in pure safe Rust against the strict-isolation clean-room
-workspace at
+**Round 2 — clean-room decoder + framework integration + trace
+tape + format=2.** Decodes TTA1 format=1 (integer PCM) and format=2
+(password-derived qm priming, `spec/07`) streams in pure safe Rust
+against the strict-isolation clean-room workspace at
 [`docs/audio/tta-cleanroom/`](https://github.com/OxideAV/docs/tree/master/audio/tta-cleanroom).
 
 The fresh orphan `master` is the starting point; the previous
@@ -42,10 +43,34 @@ input to this rebuild.
 - **PCM packing**: signed 16-bit LE and signed 24-bit LE output via
   `pack_pcm` per spec §3.2.
 
-Out of scope for round 1 (deferred to later rounds): format=2
-(encrypted), format=3 (IEEE float), production encoder, container
-demuxer beyond what's needed to feed the decoder, the Stage-06 trace
-contract debug instrumentation.
+## What round 2 adds on top
+
+- **`spec/06` debug trace emitter**: gated behind a `trace` Cargo
+  feature (off by default) and the `OXIDEAV_TTA_TRACE_FILE` env var
+  per spec/06 §2. With both on, the decoder writes one TSV event
+  line per state transition (18-event vocabulary) suitable for
+  lockstep diff against a libtta-instrumented tape via
+  `docs/audio/tta-cleanroom/tools/tta-diff/`. Zero overhead when
+  the feature is off.
+- **`oxideav-core` framework integration**: default-on `registry`
+  Cargo feature wires a `Decoder` impl (codec id `"tta"`), a raw-
+  `.tta` `Demuxer` (probe / `tta` extension), and the
+  `register(ctx)` entry point that `oxideav-meta::register_all`
+  picks up via `oxideav_core::register!`. Standalone consumers can
+  build with `default-features = false` to drop the `oxideav-core`
+  dep.
+- **Format=2 (password-derived qm priming)** per `spec/07`:
+  `decode_with_password(bytes, password)` derives an ECMA-182
+  CRC-64 digest of the password and primes Stage-A's `qm[0..7]`
+  with the eight digest bytes (sign-extended int8 → int32) at every
+  per-channel frame init. Plain `decode()` returns
+  `Error::PasswordRequired` for format=2 streams.
+
+Still out of scope (no current asks): format=3 (IEEE float),
+production encoder, frame-boundary-aware streaming demuxer (the
+current demuxer ships the file as one self-contained packet), and
+bit-exact lockstep against libtta-encoded reference fixtures
+(needs a sanctioned fixture in `audit/reference-tapes/`).
 
 ## Why clean-room
 

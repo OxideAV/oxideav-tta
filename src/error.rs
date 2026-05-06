@@ -27,6 +27,11 @@ pub enum Error {
     /// `sample_rate` exceeded the workspace-policy ceiling of `0x7FFFFF`
     /// Hz (the reserved-high-bit boundary documented in `spec/01` §3.3).
     UnsupportedSampleRate(u32),
+    /// The header carried `format == 2` (encrypted) but no password
+    /// was supplied to the decoder. Mirror of libtta's
+    /// `TTA_PASSWORD_ERROR` per `spec/07` §7. Use
+    /// [`crate::decode_with_password`] to supply one.
+    PasswordRequired,
 }
 
 impl core::fmt::Display for Error {
@@ -51,6 +56,9 @@ impl core::fmt::Display for Error {
                     f,
                     "oxideav-tta: sample rate {v} exceeds policy ceiling 0x7FFFFF"
                 )
+            }
+            Error::PasswordRequired => {
+                f.write_str("oxideav-tta: format=2 (encrypted) stream requires a password")
             }
         }
     }

@@ -1,10 +1,11 @@
 //! Pure-Rust True Audio (TTA) lossless audio codec.
 //!
-//! **Round 1 — clean-room implementation.** This crate decodes TTA1
-//! format=1 (integer PCM) streams in pure safe Rust against the
-//! strict-isolation clean-room workspace at
-//! `docs/audio/tta-cleanroom/`. Format=2 (encrypted) and format=3
-//! (IEEE float) are out of scope; the encoder is reserved for round 2.
+//! **Round 2 — clean-room implementation.** This crate decodes TTA1
+//! format=1 (integer PCM) and format=2 (password-derived qm priming;
+//! `spec/07`) streams in pure safe Rust against the strict-isolation
+//! clean-room workspace at `docs/audio/tta-cleanroom/`. Round 2 also
+//! adds the spec/06 trace contract (debug build) and the
+//! `oxideav-core` framework integration.
 //!
 //! The decoder pipeline mirrors `spec/02..05`:
 //!
@@ -23,10 +24,25 @@
 //! seek-table, and per-frame CRC32s using the standard IEEE-802.3
 //! polynomial.
 //!
+//! ## Cargo features
+//!
+//! - **`registry`** (default): wire the crate into `oxideav-core`'s
+//!   codec / container registries. Disable for standalone builds that
+//!   want the decoder without the framework dependency.
+//! - **`trace`** (off by default): activate the `spec/06`
+//!   debug-build trace emitter. With the feature on AND
+//!   `OXIDEAV_TTA_TRACE_FILE=<path>` set, [`Decoder::decode_all`]
+//!   writes one TSV event line per state transition to that path,
+//!   compatible with `tools/tta-diff/`. With the feature off this is
+//!   compile-time stripped to zero overhead.
+//!
 //! ## Public API
 //!
 //! - [`decode`] — single-shot decode of a complete TTA1 byte buffer
 //!   into interleaved `i32` samples and the parsed [`StreamInfo`].
+//! - [`decode_with_password`] — same but for format=2 streams; the
+//!   password derives the eight-byte digest used to prime Stage-A's
+//!   `qm[]` per `spec/07` §3.
 //! - [`pack_pcm`] — convenience packer that converts the `i32` output
 //!   into the appropriate `i16` / 24-bit / `i32` little-endian byte
 //!   stream per `spec/01` §3.2.
@@ -48,9 +64,14 @@ mod encoder;
 mod error;
 mod header;
 mod lms;
+mod password;
+#[cfg(feature = "registry")]
+mod registry;
 mod rice;
 mod stage_b;
 mod tables;
+#[cfg(feature = "trace")]
+mod trace;
 
 pub use crate::decoder::{decode_frame, Decoder};
 pub use crate::error::{Error, Result};
@@ -71,10 +92,42 @@ pub type StreamInfo = StreamHeader;
 ///
 /// All header / seek-table / per-frame CRCs are verified; any failure
 /// returns the appropriate [`Error`] variant.
+///
+/// Format=2 (encrypted) streams return [`Error::PasswordRequired`];
+/// use [`decode_with_password`] to supply the password.
 pub fn decode(bytes: &[u8]) -> Result<(StreamInfo, Vec<i32>)> {
     let dec = Decoder::new(bytes)?;
     let header = dec.header;
     let pcm = dec.decode_all()?;
+    Ok((header, pcm))
+}
+
+/// Decode a format=2 (password-protected) TTA1 byte buffer.
+///
+/// The password is hashed with ECMA-182 CRC-64 to derive the eight-
+/// byte qm priming vector applied at every per-channel Stage-A reset
+/// (`spec/07` §3). Format=1 streams accept the same call — the
+/// priming is computed but unused (qm always zero-init for format=1
+/// per `spec/02` §3.1).
+pub fn decode_with_password(bytes: &[u8], password: &[u8]) -> Result<(StreamInfo, Vec<i32>)> {
+    let priming = crate::password::derive_qm_priming(password);
+    let dec = Decoder::new_with_priming(bytes, Some(priming))?;
+    let header = dec.header;
+    // Format=1 with password supplied: the digest is computed but
+    // shouldn't actually mutate state — fall through to the
+    // priming-aware decoder, which only applies the priming when
+    // the header carries format == 2 (Decoder::new_with_priming
+    // stores it but decode_frame_inner accepts it unconditionally;
+    // for format=1 the existing format=1 corpus expects zero qm
+    // init, so we re-zero in that branch).
+    let pcm = if header.format == 1 {
+        // Re-construct without the priming so format=1's invariant
+        // (qm zero-init at every frame) is preserved.
+        let dec_clean = Decoder::new(bytes)?;
+        dec_clean.decode_all()?
+    } else {
+        dec.decode_all()?
+    };
     Ok((header, pcm))
 }
 
@@ -109,6 +162,16 @@ pub fn pack_pcm(samples: &[i32], bits_per_sample: u16) -> Vec<u8> {
     }
     out
 }
+
+// Framework integration: when the `registry` feature is on, expose
+// the canonical `register(ctx)` function and let the macro-generated
+// `__oxideav_entry` hook into `oxideav-meta::register_all`. Standalone
+// (no-`oxideav-core`) builds drop both.
+#[cfg(feature = "registry")]
+pub use crate::registry::{register, register_codecs, register_containers, CODEC_ID_STR};
+
+#[cfg(feature = "registry")]
+oxideav_core::register!("oxideav-tta", register);
 
 #[cfg(test)]
 mod roundtrip_tests;

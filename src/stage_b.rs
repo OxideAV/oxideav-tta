@@ -26,12 +26,39 @@ impl StageBState {
     /// One Stage-B step. Returns `s_B` and stores it as the new
     /// `prev`.
     #[inline]
+    #[allow(dead_code)] // direct callers vanish under `--features trace`.
     pub fn step(&mut self, s_a: i32) -> i32 {
+        self.step_traced(s_a).sample_after_b
+    }
+
+    /// Same as [`Self::step`] but exposes the intermediate values
+    /// required by the spec/06 `STAGE_B_PREDICT` trace event:
+    /// `prev_in` (state at function entry), `predicted_b` (= `(prev *
+    /// 31) >> 5`), `residual_b` (= the input `s_a`), and
+    /// `sample_after_b` (= the output, also the new `prev`).
+    #[inline]
+    pub fn step_traced(&mut self, s_a: i32) -> StageBTrace {
+        let prev_in = self.prev;
         let p_b = self.prev.wrapping_mul(31) >> 5;
         let s_b = s_a.wrapping_add(p_b);
         self.prev = s_b;
-        s_b
+        StageBTrace {
+            prev_in,
+            predicted_b: p_b,
+            residual_b: s_a,
+            sample_after_b: s_b,
+        }
     }
+}
+
+/// Side-channel return of one [`StageBState::step_traced`] call — the
+/// values feeding the spec/06 `STAGE_B_PREDICT` event.
+#[allow(dead_code)] // many fields only referenced by the trace emitter (cfg-gated).
+pub struct StageBTrace {
+    pub prev_in: i32,
+    pub predicted_b: i32,
+    pub residual_b: i32,
+    pub sample_after_b: i32,
 }
 
 #[cfg(test)]

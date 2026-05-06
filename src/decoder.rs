@@ -14,6 +14,9 @@ use crate::lms::LmsState;
 use crate::rice::{self, RiceState};
 use crate::stage_b::StageBState;
 
+#[cfg(feature = "trace")]
+use crate::trace::TraceWriter;
+
 /// One per-channel pipeline state bundle.
 struct ChannelState {
     rice: RiceState,
@@ -32,6 +35,29 @@ pub fn decode_frame(
     header: &StreamHeader,
     descriptor: &FrameDescriptor,
     frame_bytes: &[u8],
+) -> Result<Vec<i32>> {
+    decode_frame_inner(
+        header,
+        descriptor,
+        frame_bytes,
+        /* qm_priming */ None,
+        /* frame_idx */ 0,
+        #[cfg(feature = "trace")]
+        None,
+    )
+}
+
+/// Internal frame-decode entry point used by both the public
+/// [`decode_frame`] and the `Decoder::decode_all` loop. The latter
+/// supplies a `frame_idx` for the trace counters and (when the
+/// `trace` feature is on) an `&mut TraceWriter` to emit events into.
+fn decode_frame_inner(
+    header: &StreamHeader,
+    descriptor: &FrameDescriptor,
+    frame_bytes: &[u8],
+    qm_priming: Option<&[i32; 8]>,
+    frame_idx: u32,
+    #[cfg(feature = "trace")] trace: Option<&mut TraceWriter>,
 ) -> Result<Vec<i32>> {
     let disk = descriptor.disk_size as usize;
     if frame_bytes.len() < disk {
@@ -52,27 +78,136 @@ pub fn decode_frame(
 
     let mut reader = BitReader::new(body);
     let mut channels: Vec<ChannelState> = (0..nch)
-        .map(|_| ChannelState {
-            rice: RiceState::frame_init(),
-            lms: LmsState::frame_init(bytes_per_sample),
-            stage_b: StageBState::frame_init(),
+        .map(|_| {
+            let mut lms = LmsState::frame_init(bytes_per_sample);
+            // Spec/07 §3.5 — for format=2, the per-frame Stage-A
+            // reset re-primes qm[0..7] with the password digest
+            // (sign-extended int8 → int32) instead of zeros. All
+            // other fields keep the format=1 zero-init.
+            if let Some(prime) = qm_priming {
+                lms.qm = *prime;
+            }
+            ChannelState {
+                rice: RiceState::frame_init(),
+                lms,
+                stage_b: StageBState::frame_init(),
+            }
         })
         .collect();
+
+    #[cfg(feature = "trace")]
+    let mut trace = trace;
+    #[cfg(feature = "trace")]
+    if let Some(t) = trace.as_mut() {
+        t.ev_frame_begin(frame_idx, samples_per_frame as u32);
+    }
 
     // Per-step inner loop: for each PCM sample slot, decode every
     // channel's Rice -> Stage-A -> Stage-B in turn into a scratch
     // buffer, then run the inverse decorrelation cascade in place,
     // then write into `out` interleaved.
     let mut scratch: Vec<i32> = vec![0; nch];
+    #[cfg(feature = "trace")]
+    let mut step_idx: u32 = 0;
     for sample_idx in 0..samples_per_frame {
         for ch in 0..nch {
             let cs = &mut channels[ch];
-            let e = rice::decode_one(&mut reader, &mut cs.rice)?;
-            let s_a = cs.lms.step(e);
-            let s_b = cs.stage_b.step(s_a);
-            scratch[ch] = s_b;
+
+            #[cfg(feature = "trace")]
+            {
+                let rice_t = rice::decode_one_traced(&mut reader, &mut cs.rice)?;
+                if let Some(t) = &mut trace {
+                    t.ev_rice_decode(
+                        frame_idx,
+                        step_idx,
+                        ch as u32,
+                        rice_t.raw_unary,
+                        rice_t.mode_high,
+                        rice_t.k_used,
+                        rice_t.residual_signed,
+                    );
+                    t.ev_rice_k_update(
+                        frame_idx,
+                        step_idx,
+                        ch as u32,
+                        rice_t.k0_post,
+                        rice_t.k1_post,
+                        rice_t.sum0_post,
+                        rice_t.sum1_post,
+                    );
+                }
+                let lms_t = cs.lms.step_traced(rice_t.residual_signed);
+                if let Some(t) = &mut trace {
+                    t.ev_lms_pre(
+                        frame_idx,
+                        step_idx,
+                        ch as u32,
+                        &lms_t.dl_pre,
+                        &lms_t.dx_pre,
+                        &lms_t.qm_pre,
+                    );
+                    t.ev_stage_a_predict(
+                        frame_idx,
+                        step_idx,
+                        ch as u32,
+                        lms_t.predicted_a,
+                        rice_t.residual_signed,
+                        lms_t.sample_after_a,
+                    );
+                    t.ev_lms_post(
+                        frame_idx,
+                        step_idx,
+                        ch as u32,
+                        &lms_t.dl_post,
+                        &lms_t.dx_post,
+                        &lms_t.qm_post,
+                        lms_t.error_pre,
+                    );
+                }
+                let sb_t = cs.stage_b.step_traced(lms_t.sample_after_a);
+                if let Some(t) = &mut trace {
+                    t.ev_stage_b_predict(
+                        frame_idx,
+                        step_idx,
+                        ch as u32,
+                        sb_t.prev_in,
+                        sb_t.predicted_b,
+                        sb_t.residual_b,
+                        sb_t.sample_after_b,
+                    );
+                }
+                scratch[ch] = sb_t.sample_after_b;
+                step_idx += 1;
+            }
+
+            #[cfg(not(feature = "trace"))]
+            {
+                let e = rice::decode_one(&mut reader, &mut cs.rice)?;
+                let s_a = cs.lms.step(e);
+                let s_b = cs.stage_b.step(s_a);
+                scratch[ch] = s_b;
+            }
         }
+
+        #[cfg(feature = "trace")]
+        if let Some(t) = &mut trace {
+            // DECORR_PRE / DECORR_POST are emitted only for nch > 1
+            // per spec/06 §5.5; PCM_OUT always.
+            if nch > 1 {
+                t.ev_decorr_pre(frame_idx, sample_idx as u32, &scratch);
+            }
+        }
+
         decorr::inverse(&mut scratch);
+
+        #[cfg(feature = "trace")]
+        if let Some(t) = &mut trace {
+            if nch > 1 {
+                t.ev_decorr_post(frame_idx, sample_idx as u32, &scratch);
+            }
+            t.ev_pcm_out(frame_idx, sample_idx as u32, &scratch);
+        }
+
         let base = sample_idx * nch;
         out[base..base + nch].copy_from_slice(&scratch);
     }
@@ -93,10 +228,19 @@ pub fn decode_frame(
             crc.update_byte(b);
         }
     }
-    if crc.finalize() != stored_crc {
+    let computed_crc = crc.finalize();
+    let crc_ok = computed_crc == stored_crc;
+
+    #[cfg(feature = "trace")]
+    if let Some(t) = &mut trace {
+        t.ev_frame_end(frame_idx, computed_crc, stored_crc, crc_ok);
+    }
+
+    if !crc_ok {
         return Err(Error::Crc32Mismatch { region: "frame" });
     }
 
+    let _ = frame_idx; // silence unused warning when `trace` is off
     Ok(out)
 }
 
@@ -111,18 +255,39 @@ pub struct Decoder<'a> {
     /// by the linear-decode path; consumers can warn if they care.)
     pub seek_table_crc_ok: bool,
     pub bytes: &'a [u8],
+    /// Optional Stage-A `qm[0..7]` priming vector. `None` for
+    /// format=1 (the default — qm zero-inits per spec/02 §3.1);
+    /// `Some(digest)` for format=2 (spec/07 §3.5).
+    pub(crate) qm_priming: Option<[i32; 8]>,
 }
 
 impl<'a> Decoder<'a> {
     /// Parse `bytes` as a TTA1 file (with optional ID3v2 prefix) and
     /// return a [`Decoder`] ready to walk the frames.
     pub fn new(bytes: &'a [u8]) -> Result<Self> {
+        Self::new_with_priming(bytes, None)
+    }
+
+    /// Like [`Self::new`] but accepts a Stage-A LMS `qm` priming
+    /// vector for format=2 streams (per spec/07 §3.5). Public callers
+    /// should use [`crate::decode_with_password`] instead, which
+    /// computes the priming from a password automatically.
+    pub(crate) fn new_with_priming(bytes: &'a [u8], qm_priming: Option<[i32; 8]>) -> Result<Self> {
         let id3_skip = crate::header::skip_id3v2_prefix(bytes)?;
         let after_id3 = &bytes[id3_skip..];
-        let (header, hdr_len) = crate::header::parse_stream_header(after_id3)?;
+        let (header, hdr_len) = crate::header::parse_stream_header_any_format(after_id3)?;
+        // Format gating fires BEFORE seek-table parse so that a
+        // format-validation test on a header-only fixture surfaces
+        // the format error (PasswordRequired or UnsupportedFormat)
+        // without first tripping a Truncated seek-table read.
+        if header.format == 2 && qm_priming.is_none() {
+            return Err(Error::PasswordRequired);
+        }
+        if header.format != 1 && header.format != 2 {
+            return Err(Error::UnsupportedFormat(header.format));
+        }
         let seek_table_input = &after_id3[hdr_len..];
         let seek_base = (id3_skip + hdr_len) as u64;
-        // Compute frame data start: after header + entire seek table.
         let (frame_count, _) = header.frame_geometry();
         let seek_table_len = (frame_count as usize) * 4 + 4;
         let frame_data_start = seek_base + seek_table_len as u64;
@@ -133,25 +298,85 @@ impl<'a> Decoder<'a> {
             frames: seek_table.frames,
             seek_table_crc_ok: seek_table.crc_ok,
             bytes,
+            qm_priming,
         })
     }
 
     /// Decode every frame and return interleaved `i32` PCM samples
     /// for the entire stream (`total_samples * channels` entries).
     pub fn decode_all(&self) -> Result<Vec<i32>> {
+        #[cfg(feature = "trace")]
+        let mut trace = TraceWriter::open_from_env();
+        #[cfg(feature = "trace")]
+        self.emit_file_level_trace(trace.as_mut());
+
         let mut out = Vec::with_capacity(
             (self.header.total_samples as usize) * (self.header.channels as usize),
         );
-        for frame in &self.frames {
+        for (i, frame) in self.frames.iter().enumerate() {
             let off = frame.file_offset as usize;
             let end = off + frame.disk_size as usize;
             if end > self.bytes.len() {
                 return Err(Error::Truncated);
             }
             let frame_bytes = &self.bytes[off..end];
-            let pcm = decode_frame(&self.header, frame, frame_bytes)?;
+            let pcm = decode_frame_inner(
+                &self.header,
+                frame,
+                frame_bytes,
+                self.qm_priming.as_ref(),
+                i as u32,
+                #[cfg(feature = "trace")]
+                trace.as_mut(),
+            )?;
             out.extend_from_slice(&pcm);
         }
         Ok(out)
+    }
+
+    /// Emit the §5.1 container-level events plus the §5.2 per-channel
+    /// init events to the trace tape, in the order required by §7.1
+    /// and §7.2.
+    #[cfg(feature = "trace")]
+    fn emit_file_level_trace(&self, trace: Option<&mut TraceWriter>) {
+        let Some(t) = trace else {
+            return;
+        };
+        t.ev_file_header(
+            true,
+            self.header.format as u32,
+            self.header.channels as u32,
+            self.header.bits_per_sample as u32,
+            self.header.sample_rate,
+            self.header.total_samples,
+        );
+        // We don't recompute the header CRC at this point — by the
+        // time the Decoder is constructed, the header parser has
+        // already verified it (or returned an error). Emit an "ok"
+        // marker with a zero placeholder for `computed_crc`.
+        t.ev_header_crc(true, 0);
+
+        let frame_count = self.frames.len() as u32;
+        t.ev_seek_table_begin(frame_count);
+        for (i, f) in self.frames.iter().enumerate() {
+            t.ev_seek_entry(i as u32, f.disk_size, f.file_offset);
+        }
+        t.ev_seek_table_end(self.seek_table_crc_ok);
+
+        // Per-channel init events fire channel-major, frame_idx = -1.
+        let bytes_per_sample = self.header.bytes_per_sample();
+        let lms_seed = LmsState::frame_init(bytes_per_sample);
+        let rice_seed = RiceState::frame_init();
+        for ch in 0..self.header.channels as u32 {
+            t.ev_lms_init(-1, ch, lms_seed.shift, lms_seed.round);
+            t.ev_rice_k_init(
+                -1,
+                ch,
+                rice_seed.k0,
+                rice_seed.k1,
+                rice_seed.sum0,
+                rice_seed.sum1,
+            );
+        }
     }
 }

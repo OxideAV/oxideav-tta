@@ -39,6 +39,38 @@ pub fn encode_to_tta1(
     bits_per_sample: u16,
     sample_rate: u32,
 ) -> Vec<u8> {
+    encode_to_tta1_inner(samples, channels, bits_per_sample, sample_rate, 1, None)
+}
+
+/// Format=2 encoder for self-roundtrip tests: primes Stage-A's
+/// `qm[0..7]` with the password digest at every per-channel frame
+/// init (per `spec/07` §3.5) and writes `format = 2` in the header.
+pub fn encode_to_tta1_format2(
+    samples: &[i32],
+    channels: u16,
+    bits_per_sample: u16,
+    sample_rate: u32,
+    password: &[u8],
+) -> Vec<u8> {
+    let priming = crate::password::derive_qm_priming(password);
+    encode_to_tta1_inner(
+        samples,
+        channels,
+        bits_per_sample,
+        sample_rate,
+        2,
+        Some(priming),
+    )
+}
+
+fn encode_to_tta1_inner(
+    samples: &[i32],
+    channels: u16,
+    bits_per_sample: u16,
+    sample_rate: u32,
+    format: u16,
+    qm_priming: Option<[i32; 8]>,
+) -> Vec<u8> {
     assert!((1..=6).contains(&channels));
     assert!((16..=24).contains(&bits_per_sample));
     assert!(sample_rate > 0 && sample_rate <= 0x007F_FFFF);
@@ -70,14 +102,14 @@ pub fn encode_to_tta1(
         let n_samples = if is_last { last_samples } else { regular } as usize;
         let frame_pcm = &samples[sample_cursor..sample_cursor + n_samples * nch];
         sample_cursor += n_samples * nch;
-        let blob = encode_one_frame(frame_pcm, nch, bytes_per_sample);
+        let blob = encode_one_frame(frame_pcm, nch, bytes_per_sample, qm_priming.as_ref());
         frame_blobs.push(blob);
     }
 
     let mut file = Vec::new();
     // Header (22 bytes).
     file.extend_from_slice(b"TTA1");
-    file.extend_from_slice(&1u16.to_le_bytes());
+    file.extend_from_slice(&format.to_le_bytes());
     file.extend_from_slice(&channels.to_le_bytes());
     file.extend_from_slice(&bits_per_sample.to_le_bytes());
     file.extend_from_slice(&sample_rate.to_le_bytes());
@@ -102,14 +134,25 @@ pub fn encode_to_tta1(
     file
 }
 
-fn encode_one_frame(pcm: &[i32], nch: usize, bytes_per_sample: usize) -> Vec<u8> {
+fn encode_one_frame(
+    pcm: &[i32],
+    nch: usize,
+    bytes_per_sample: usize,
+    qm_priming: Option<&[i32; 8]>,
+) -> Vec<u8> {
     let samples_per_channel = pcm.len() / nch;
     let mut writer = BitWriter::new();
     let mut chans: Vec<EncoderChannelState> = (0..nch)
-        .map(|_| EncoderChannelState {
-            rice: RiceState::frame_init(),
-            lms: LmsState::frame_init(bytes_per_sample),
-            stage_b: StageBState::frame_init(),
+        .map(|_| {
+            let mut lms = LmsState::frame_init(bytes_per_sample);
+            if let Some(prime) = qm_priming {
+                lms.qm = *prime;
+            }
+            EncoderChannelState {
+                rice: RiceState::frame_init(),
+                lms,
+                stage_b: StageBState::frame_init(),
+            }
         })
         .collect();
 

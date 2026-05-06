@@ -50,7 +50,27 @@ impl LmsState {
     /// One Stage-A step: consume residual `e`, return the
     /// reconstructed sample `s_A = e + p_A`. Updates the state in
     /// place per spec §4.2 STEPs 1..5.
+    #[allow(dead_code)] // direct callers vanish under `--features trace`.
     pub fn step(&mut self, e: i32) -> i32 {
+        self.step_traced(e).sample_after_a
+    }
+
+    /// Same as [`Self::step`] but also returns the intermediate values
+    /// needed to populate `LMS_PRE`, `STAGE_A_PREDICT`, and `LMS_POST`
+    /// trace events per `spec/06-trace-contract.md` §5.4.
+    ///
+    /// `LmsTrace.dl_pre` / `dx_pre` / `qm_pre` are the snapshots taken
+    /// **before** the step modifies the state; `dl_post` / `dx_post` /
+    /// `qm_post` are the post-update state copied straight off `self`.
+    /// `error_pre` is the value of `self.error` at function entry (=
+    /// the previous step's residual, which gates the STEP 1 sign-LMS
+    /// update).
+    pub fn step_traced(&mut self, e: i32) -> LmsTrace {
+        let dl_pre_full = self.dl;
+        let dx_pre_full = self.dx;
+        let qm_pre_full = self.qm;
+        let error_pre = self.error;
+
         // STEP 1 — sign-LMS qm update gated on the previous step's
         // residual, currently held in `self.error`.
         if self.error > 0 {
@@ -98,8 +118,34 @@ impl LmsState {
             .wrapping_sub(dl_pre[1])
             .wrapping_sub(dl_pre[2])
             .wrapping_sub(dl_pre[3]);
-        s_a
+
+        LmsTrace {
+            dl_pre: dl_pre_full,
+            dx_pre: dx_pre_full,
+            qm_pre: qm_pre_full,
+            error_pre,
+            predicted_a: p_a,
+            sample_after_a: s_a,
+            dl_post: self.dl,
+            dx_post: self.dx,
+            qm_post: self.qm,
+        }
     }
+}
+
+/// Side-channel return of one [`LmsState::step_traced`] call — the
+/// raw intermediate values required by the spec/06 trace emitter.
+#[allow(dead_code)] // many fields only referenced by the trace emitter (cfg-gated).
+pub struct LmsTrace {
+    pub dl_pre: [i32; 8],
+    pub dx_pre: [i32; 8],
+    pub qm_pre: [i32; 8],
+    pub error_pre: i32,
+    pub predicted_a: i32,
+    pub sample_after_a: i32,
+    pub dl_post: [i32; 8],
+    pub dx_post: [i32; 8],
+    pub qm_post: [i32; 8],
 }
 
 #[cfg(test)]
