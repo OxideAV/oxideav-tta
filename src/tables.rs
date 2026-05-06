@@ -9,12 +9,15 @@
 use std::sync::OnceLock;
 
 /// CSV body of `tables/lms-shift.csv` (3 rows, header `index,shift`).
-const LMS_SHIFT_CSV: &str = include_str!("../../../docs/audio/tta-cleanroom/tables/lms-shift.csv");
+/// Vendored snapshot of the cleanroom workspace's
+/// `docs/audio/tta-cleanroom/tables/lms-shift.csv`; see `tables/README.md`.
+const LMS_SHIFT_CSV: &str = include_str!("../tables/lms-shift.csv");
 
 /// CSV body of `tables/lms-dx-magnitudes.csv` (4 rows, header
-/// `dx_index,magnitude`).
-const LMS_DX_MAGNITUDES_CSV: &str =
-    include_str!("../../../docs/audio/tta-cleanroom/tables/lms-dx-magnitudes.csv");
+/// `dx_index,magnitude`). Vendored snapshot of the cleanroom workspace's
+/// `docs/audio/tta-cleanroom/tables/lms-dx-magnitudes.csv`; see
+/// `tables/README.md`.
+const LMS_DX_MAGNITUDES_CSV: &str = include_str!("../tables/lms-dx-magnitudes.csv");
 
 static LMS_SHIFT_TABLE: OnceLock<[i32; 3]> = OnceLock::new();
 static LMS_DX_MAGNITUDES_TABLE: OnceLock<[i32; 4]> = OnceLock::new();
