@@ -175,3 +175,6 @@ oxideav_core::register!("oxideav-tta", register);
 
 #[cfg(test)]
 mod roundtrip_tests;
+
+#[cfg(all(test, feature = "registry"))]
+mod seek_tests;

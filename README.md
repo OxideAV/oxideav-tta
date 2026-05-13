@@ -59,6 +59,18 @@ input to this rebuild.
   picks up via `oxideav_core::register!`. Standalone consumers can
   build with `default-features = false` to drop the `oxideav-core`
   dep.
+- **Frame-boundary streaming demuxer + O(1) seek**: the registered
+  `.tta` demuxer parses the TTA1 seek table at open and emits one
+  packet per audio frame (each wrapped as a self-contained mini-
+  TTA1 file so the decoder can consume it without coordination).
+  `Demuxer::seek_to(pts)` is O(1): the target frame is
+  `min(pts / regular_frame_samples, n_frames - 1)` per `spec/01`
+  §4.1, with `regular_frame_samples = floor(sample_rate * 256 / 245)`.
+  Sub-frame pts requests snap to the containing frame's first
+  sample, negative pts clamp to 0, and past-end pts clamp to the
+  last frame's first sample. Decoder state self-resets at every
+  frame boundary by construction (`spec/02-05`), so the demuxer
+  does not need to coordinate LMS / Stage-B / Rice resets.
 - **Format=2 (password-derived qm priming)** per `spec/07`:
   `decode_with_password(bytes, password)` derives an ECMA-182
   CRC-64 digest of the password and primes Stage-A's `qm[0..7]`
@@ -67,10 +79,9 @@ input to this rebuild.
   `Error::PasswordRequired` for format=2 streams.
 
 Still out of scope (no current asks): format=3 (IEEE float),
-production encoder, frame-boundary-aware streaming demuxer (the
-current demuxer ships the file as one self-contained packet), and
-bit-exact lockstep against libtta-encoded reference fixtures
-(needs a sanctioned fixture in `audit/reference-tapes/`).
+production encoder, and bit-exact lockstep against libtta-encoded
+reference fixtures (needs a sanctioned fixture in
+`audit/reference-tapes/`).
 
 ## Why clean-room
 

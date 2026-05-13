@@ -8,6 +8,27 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Frame-boundary streaming demuxer + O(1) seek (`Demuxer::seek_to`)
+  built on the TTA1 in-file seek table. Each demuxer packet is a
+  self-contained mini-TTA1 file carrying exactly one audio frame
+  (re-prefixed header + 1-entry seek table + that frame's body),
+  emitted with monotonically increasing pts in samples per
+  `time_base = 1/sample_rate`. `seek_to(pts)` is a constant-time
+  lookup: `target_frame = min(pts.max(0) / regular_frame_samples,
+  n_frames - 1)` per `spec/01-bitstream-framing.md` §4.1, with
+  `regular_frame_samples = floor(sample_rate * 256 / 245)`.
+  Sub-frame pts requests snap to the containing frame's first
+  sample, negative pts clamp to 0, past-end pts clamp to the last
+  frame. Decoder per-channel state (LMS / Stage-B / Rice) resets at
+  every frame boundary by construction (`spec/02..05`), so the
+  demuxer does not coordinate decoder reset — the next mini-file
+  packet starts a fresh decoder run. Covered by five tests in
+  `src/seek_tests.rs`: `seek_to_zero_resets_to_first_frame`,
+  `seek_at_frame_boundary_lands_exact`,
+  `seek_mid_frame_lands_at_containing_frame_start`,
+  `seek_past_end_clamps_to_last_frame`, and
+  `seek_pts_matches_decoder_output_after_seek` (encode → seek →
+  decode → byte-identical PCM round-trip).
 - Round-2: `spec/06-trace-contract.md` debug trace emitter behind
   the new `trace` Cargo feature (off by default). With the feature
   on AND `OXIDEAV_TTA_TRACE_FILE=<path>` set, the decoder writes

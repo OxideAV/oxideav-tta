@@ -16,7 +16,10 @@ use oxideav_core::{
 };
 use std::io::Read;
 
-use crate::header::{parse_seek_table, parse_stream_header_any_format, skip_id3v2_prefix};
+use crate::header::{
+    parse_seek_table, parse_stream_header_any_format, skip_id3v2_prefix, FrameDescriptor,
+    StreamHeader,
+};
 
 /// Canonical codec id string for True Audio. `oxideav-meta`'s
 /// `register_all` calls `crate::__oxideav_entry`, which delegates
@@ -197,12 +200,30 @@ fn probe(p: &ProbeData) -> u8 {
     0
 }
 
-/// Raw `.tta` demuxer: slurp the entire file into one packet that
-/// the decoder treats as a single self-contained TTA1 stream. Frame-
-/// boundary aware streaming demuxing (one packet per TTA frame keyed
-/// off the seek table) is feasible but not needed for the round-2
-/// integration milestone — the codec self-decodes the whole file in
-/// one call already.
+/// Crate-internal alias for `open_demuxer` used by the in-tree seek
+/// tests. The codec registry only exposes the factory by function
+/// pointer; tests want to call it directly so they can keep a typed
+/// handle on the result rather than going through the
+/// `ContainerRegistry` indirection.
+#[cfg(test)]
+pub(crate) fn open_demuxer_for_test(
+    input: Box<dyn ReadSeek>,
+    codecs: &dyn CodecResolver,
+) -> CoreResult<Box<dyn Demuxer>> {
+    open_demuxer(input, codecs)
+}
+
+/// Raw `.tta` demuxer: parses the TTA1 header + seek table at open
+/// time, then emits one packet per audio frame. Each packet is a
+/// self-contained mini-TTA1 file (re-prefixed header + 1-entry seek
+/// table + the frame body) so the existing single-file `TtaDecoder`
+/// can decode it without alteration.
+///
+/// Because TTA1 carries a complete byte-offset seek table in the file
+/// header (per `spec/01-bitstream-framing.md` §4), `seek_to` is O(1):
+/// the target frame is `pts / regular_frame_samples`, and its byte
+/// offset is the pre-computed cumulative sum of seek-table entries up
+/// to that index.
 fn open_demuxer(
     mut input: Box<dyn ReadSeek>,
     _codecs: &dyn CodecResolver,
@@ -213,21 +234,18 @@ fn open_demuxer(
     // Skip optional ID3v2 prefix and parse the header for stream info.
     let id3_skip = skip_id3v2_prefix(&all)
         .map_err(|e| CoreError::invalid(format!("oxideav-tta demuxer: {e}")))?;
-    let after_id3 = &all[id3_skip..];
+    let after_id3_off = id3_skip;
+    let after_id3 = &all[after_id3_off..];
     let (header, hdr_len) = parse_stream_header_any_format(after_id3)
         .map_err(|e| CoreError::invalid(format!("oxideav-tta demuxer: {e}")))?;
-    // Validate the seek table; the demuxer doesn't use the entries
-    // since it ships the whole file as one packet, but a
-    // CRC-mismatch is a clean way to surface a corrupted stream
-    // before the codec tries to decode it.
-    let (frame_count, _) = header.frame_geometry();
-    let seek_len = (frame_count as usize) * 4 + 4;
-    let _ = parse_seek_table(
-        &after_id3[hdr_len..],
-        &header,
-        (id3_skip + hdr_len + seek_len) as u64,
-    )
-    .map_err(|e| CoreError::invalid(format!("oxideav-tta demuxer: seek-table parse: {e}")))?;
+    // Parse the seek table — we need the per-frame byte sizes to emit
+    // one packet per frame and to fast-path seek_to.
+    let (frame_count, _last_samples) = header.frame_geometry();
+    let seek_table_len = (frame_count as usize) * 4 + 4;
+    let frame_data_start = (after_id3_off + hdr_len + seek_table_len) as u64;
+    let (seek_table, _seek_consumed) =
+        parse_seek_table(&after_id3[hdr_len..], &header, frame_data_start)
+            .map_err(|e| CoreError::invalid(format!("oxideav-tta demuxer: seek-table: {e}")))?;
 
     let sample_format = match header.bits_per_sample {
         16 => SampleFormat::S16,
@@ -260,19 +278,83 @@ fn open_demuxer(
         0
     };
 
+    let regular_samples = header.regular_frame_samples() as i64;
+
     Ok(Box::new(TtaDemuxer {
         streams: vec![stream],
         all,
-        emitted: false,
+        header,
+        frames: seek_table.frames,
+        regular_samples,
+        current_frame: 0,
+        next_pts: 0,
         duration_micros,
     }))
 }
 
 struct TtaDemuxer {
     streams: Vec<StreamInfo>,
+    /// The full file bytes (including any ID3v2 prefix). Frame
+    /// descriptors carry absolute byte offsets into this buffer.
     all: Vec<u8>,
-    emitted: bool,
+    /// Parsed TTA1 stream header.
+    header: StreamHeader,
+    /// One descriptor per audio frame, ordered, with absolute
+    /// `file_offset` into `all` and the on-disk `disk_size` (body +
+    /// 4-byte trailing CRC).
+    frames: Vec<FrameDescriptor>,
+    /// `regular_frame_samples()` cached as i64 for pts arithmetic.
+    /// All non-last frames carry exactly this many per-channel samples
+    /// per spec §4.1; the last frame may be shorter.
+    regular_samples: i64,
+    /// Index of the next frame `next_packet` will emit. Reset by
+    /// `seek_to`.
+    current_frame: usize,
+    /// pts (in samples = time_base 1/sample_rate) that the next
+    /// emitted packet will carry. For frame N this is
+    /// `N * regular_samples`. Reset by `seek_to`.
+    next_pts: i64,
     duration_micros: i64,
+}
+
+impl TtaDemuxer {
+    /// Build a self-contained TTA1 byte sequence carrying exactly one
+    /// frame (the frame at `frame_idx`). This lets the existing
+    /// single-file `TtaDecoder` consume each demuxer packet without
+    /// modification: the mini-file re-uses the parsed header fields
+    /// (channels / bps / sample_rate / format) and rewrites
+    /// `total_samples` to that frame's sample count, which the header
+    /// parser + seek-table parser will agree on (`frame_geometry`
+    /// then returns `(1, sample_count)`).
+    fn build_single_frame_file(&self, frame_idx: usize) -> Vec<u8> {
+        let frame = &self.frames[frame_idx];
+        let body_off = frame.file_offset as usize;
+        let body_end = body_off + frame.disk_size as usize;
+        let frame_bytes = &self.all[body_off..body_end];
+
+        let mut out = Vec::with_capacity(22 + 8 + frame_bytes.len());
+        // 22-byte stream header. Spec/01 §3: magic + 18 bytes of meta
+        // (format, channels, bps, sample_rate, total_samples) + CRC32.
+        out.extend_from_slice(b"TTA1");
+        out.extend_from_slice(&self.header.format.to_le_bytes());
+        out.extend_from_slice(&self.header.channels.to_le_bytes());
+        out.extend_from_slice(&self.header.bits_per_sample.to_le_bytes());
+        out.extend_from_slice(&self.header.sample_rate.to_le_bytes());
+        let mini_total: u32 = frame.sample_count;
+        out.extend_from_slice(&mini_total.to_le_bytes());
+        let header_crc = crate::crc32::crc32(&out[..18]);
+        out.extend_from_slice(&header_crc.to_le_bytes());
+
+        // 1-entry seek table.
+        let seek_start = out.len();
+        out.extend_from_slice(&frame.disk_size.to_le_bytes());
+        let seek_crc = crate::crc32::crc32(&out[seek_start..seek_start + 4]);
+        out.extend_from_slice(&seek_crc.to_le_bytes());
+
+        // Frame data (body + trailing CRC, byte-for-byte).
+        out.extend_from_slice(frame_bytes);
+        out
+    }
 }
 
 impl Demuxer for TtaDemuxer {
@@ -285,17 +367,63 @@ impl Demuxer for TtaDemuxer {
     }
 
     fn next_packet(&mut self) -> CoreResult<Packet> {
-        if self.emitted {
+        if self.current_frame >= self.frames.len() {
             return Err(CoreError::Eof);
         }
-        self.emitted = true;
+        let frame_idx = self.current_frame;
+        let frame_samples = self.frames[frame_idx].sample_count as i64;
+        let data = self.build_single_frame_file(frame_idx);
+
         let stream = &self.streams[0];
-        let mut pkt = Packet::new(0, stream.time_base, std::mem::take(&mut self.all));
-        pkt.pts = Some(0);
-        pkt.dts = Some(0);
-        pkt.duration = stream.duration;
+        let mut pkt = Packet::new(0, stream.time_base, data);
+        pkt.pts = Some(self.next_pts);
+        pkt.dts = Some(self.next_pts);
+        pkt.duration = Some(frame_samples);
         pkt.flags.keyframe = true;
+
+        self.current_frame += 1;
+        self.next_pts += self.regular_samples;
         Ok(pkt)
+    }
+
+    /// Seek to the audio frame whose sample range contains `pts`.
+    ///
+    /// TTA1's built-in seek table makes this an O(1) lookup: every
+    /// non-last frame contains exactly `regular_frame_samples`
+    /// per-channel samples (`floor(sample_rate * 256 / 245)`,
+    /// `spec/01-bitstream-framing.md` §4.1), so the containing frame
+    /// is simply `pts / regular_samples`. We then reset `current_frame`
+    /// and re-anchor `next_pts` to the frame's first sample so the
+    /// subsequent `next_packet` call reproduces the post-seek pts
+    /// stream from a known frame boundary.
+    ///
+    /// The codec's per-channel LMS / Stage-B / Rice state is reset at
+    /// every frame boundary by construction (`spec/02-stage-a-lms.md`
+    /// §3.1, `spec/03-stage-b-recursive.md` §3, `spec/05-adaptive-rice.md`
+    /// §3) — so the demuxer doesn't have to coordinate decoder reset:
+    /// the next mini-file packet the decoder receives starts a fresh
+    /// decoder run.
+    fn seek_to(&mut self, stream_index: u32, pts: i64) -> CoreResult<i64> {
+        if stream_index != 0 {
+            return Err(CoreError::invalid(format!(
+                "oxideav-tta: stream index {stream_index} out of range (only stream 0 exists)"
+            )));
+        }
+        if self.frames.is_empty() || self.regular_samples == 0 {
+            return Err(CoreError::unsupported(
+                "oxideav-tta: cannot seek in a zero-frame stream",
+            ));
+        }
+        let n_frames = self.frames.len() as u64;
+        let raw_target = pts.max(0) as u64;
+        let mut target_frame = raw_target / self.regular_samples as u64;
+        if target_frame >= n_frames {
+            target_frame = n_frames - 1;
+        }
+        self.current_frame = target_frame as usize;
+        let landed_pts = (target_frame as i64) * self.regular_samples;
+        self.next_pts = landed_pts;
+        Ok(landed_pts)
     }
 
     fn duration_micros(&self) -> Option<i64> {
