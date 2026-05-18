@@ -2,9 +2,10 @@
 //!
 //! No reference TTA fixtures are checked into the workspace (the
 //! `audit/reference-tapes/**` and `reference/inputs/**` trees are
-//! gitignored), so round 1 verification is performed via the
-//! crate-internal `#[cfg(test)]` encoder, which mirrors the decoder's
-//! state machines. The test that we're verifying is:
+//! gitignored), so verification is performed via the crate's own
+//! production [`crate::encode`] / [`crate::encode_with_password`]
+//! entry points, which mirror the decoder's state machines exactly.
+//! The tests verify:
 //!
 //! - Encoder + decoder agree on every bit of the framing layer (header
 //!   CRC, seek-table CRC, per-frame CRC).
@@ -14,17 +15,14 @@
 //!   roundtrips (including the truncating-`/2` discriminator on
 //!   odd-negative cases).
 //!
-//! What this does NOT verify (deferred to Auditor / round 2):
+//! What this does NOT verify (deferred to Auditor):
 //!
 //! - Bit-exact agreement with libtta's encoded output. That requires
 //!   either a libtta-encoded fixture (forbidden input under the wall)
 //!   or a checked-in reference fixture (currently absent from the
 //!   workspace).
-//! - The trace contract in `spec/06-trace-contract.md` (no debug
-//!   instrumentation is wired in this round).
 
-use crate::encoder::{encode_to_tta1, encode_to_tta1_format2};
-use crate::{decode, decode_with_password, pack_pcm};
+use crate::{decode, decode_with_password, encode, encode_with_password, pack_pcm};
 
 /// Generate a short integer-PCM sine wave for `n_samples` per channel.
 fn sine(n_samples: usize, channels: u16, sample_rate: u32, freq_hz: f64, amp_i32: i32) -> Vec<i32> {
@@ -75,7 +73,8 @@ fn dc_with_impulse(n_samples: usize, channels: u16, dc: i32, impulse: i32) -> Ve
 /// originals exactly.
 #[track_caller]
 fn assert_roundtrip(samples: &[i32], channels: u16, bits_per_sample: u16, sample_rate: u32) {
-    let tta = encode_to_tta1(samples, channels, bits_per_sample, sample_rate);
+    let tta =
+        encode(samples, channels, bits_per_sample, sample_rate).expect("encode should succeed");
     let (info, decoded) = decode(&tta).expect("decode should succeed");
     assert_eq!(info.format, 1);
     assert_eq!(info.channels, channels);
@@ -207,7 +206,7 @@ fn trace_tape_structural_self_check_mono() {
 
     let n = 256;
     let samples = sine(n, 1, 44_100, 440.0, 8_000);
-    let tta = encode_to_tta1(&samples, 1, 16, 44_100);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode should succeed");
     let (_info, _decoded) = decode(&tta).expect("decode should succeed");
 
     crate::trace::set_thread_trace_path(None);
@@ -286,7 +285,7 @@ fn trace_tape_decorr_events_only_on_multichannel() {
 
     let n = 128;
     let samples = sine(n, 2, 44_100, 440.0, 6_000);
-    let tta = encode_to_tta1(&samples, 2, 16, 44_100);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode should succeed");
     let (_info, _decoded) = decode(&tta).expect("decode should succeed");
 
     crate::trace::set_thread_trace_path(None);
@@ -380,7 +379,8 @@ fn roundtrip_format2_password_protected() {
     let n = (44_100.0 * 0.05) as usize;
     let samples = sine(n, 1, 44_100, 440.0, 12_000);
     let password = b"correct horse battery staple";
-    let tta = encode_to_tta1_format2(&samples, 1, 16, 44_100, password);
+    let tta =
+        encode_with_password(&samples, 1, 16, 44_100, password).expect("encode should succeed");
     let (info, decoded) =
         decode_with_password(&tta, password).expect("password-aware decode should succeed");
     assert_eq!(info.format, 2);
@@ -394,7 +394,8 @@ fn format2_without_password_fails_clean() {
     // format=2 streams.
     let n = 1024;
     let samples = vec![0i32; n];
-    let tta = encode_to_tta1_format2(&samples, 1, 16, 44_100, b"hunter2");
+    let tta =
+        encode_with_password(&samples, 1, 16, 44_100, b"hunter2").expect("encode should succeed");
     assert!(matches!(decode(&tta), Err(crate::Error::PasswordRequired)));
 }
 
@@ -407,7 +408,8 @@ fn format2_wrong_password_corrupts_decode() {
     // assert at least one sample diverges from the reference.
     let n = 1024;
     let samples = sine(n, 1, 44_100, 440.0, 8_000);
-    let tta = encode_to_tta1_format2(&samples, 1, 16, 44_100, b"correct");
+    let tta =
+        encode_with_password(&samples, 1, 16, 44_100, b"correct").expect("encode should succeed");
     let (_, decoded) = decode_with_password(&tta, b"wrong").expect("decode succeeds");
     assert!(
         decoded != samples,
@@ -419,7 +421,7 @@ fn format2_wrong_password_corrupts_decode() {
 fn corrupted_frame_crc_detected() {
     let n = 256;
     let samples = sine(n, 1, 44_100, 440.0, 4_000);
-    let mut tta = encode_to_tta1(&samples, 1, 16, 44_100);
+    let mut tta = encode(&samples, 1, 16, 44_100).expect("encode should succeed");
     // Flip the very last byte (part of the trailing per-frame CRC).
     let last = tta.len() - 1;
     tta[last] ^= 0x01;

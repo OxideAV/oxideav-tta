@@ -33,9 +33,13 @@ pub fn inverse(buffer: &mut [i32]) {
     }
 }
 
-/// Encoder-side forward decorrelation, used only by the test-only
-/// encoder in `crate::encoder` for self-roundtrip fixtures.
-#[cfg(test)]
+/// Encoder-side forward decorrelation per `spec/04` §3.1.
+///
+/// Symmetric inverse of [`inverse`]: walks the channel buffer from
+/// low to high index forming successive differences, then anchors
+/// the highest channel with the truncating `/2` of the last
+/// difference. The composition `forward → inverse` is the identity
+/// over the supported `i32` range.
 pub fn forward(pcm: &mut [i32]) {
     let n = pcm.len();
     if n < 2 {

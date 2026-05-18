@@ -32,6 +32,11 @@ pub enum Error {
     /// `TTA_PASSWORD_ERROR` per `spec/07` §7. Use
     /// [`crate::decode_with_password`] to supply one.
     PasswordRequired,
+    /// The interleaved PCM buffer handed to [`crate::encode`] /
+    /// [`crate::encode_with_password`] had a length that was not a
+    /// multiple of the requested channel count. Length must equal
+    /// `total_samples * channels`.
+    InvalidSampleBuffer,
 }
 
 impl core::fmt::Display for Error {
@@ -60,6 +65,9 @@ impl core::fmt::Display for Error {
             Error::PasswordRequired => {
                 f.write_str("oxideav-tta: format=2 (encrypted) stream requires a password")
             }
+            Error::InvalidSampleBuffer => f.write_str(
+                "oxideav-tta: interleaved PCM length is not a multiple of channel count",
+            ),
         }
     }
 }

@@ -10,8 +10,8 @@
 //! `min(pts / R, N - 1)` with a re-anchored pts of
 //! `target_frame * R`.
 //!
-//! All fixtures are manufactured in-process via the crate-private
-//! `encoder::encode_to_tta1` so we don't depend on a pre-checked-in
+//! All fixtures are manufactured in-process via the public
+//! [`crate::encode`] entry point so we don't depend on a pre-checked-in
 //! TTA fixture (the round-2 deliverable still has no sanctioned
 //! reference tape).
 
@@ -21,7 +21,7 @@ use std::io::Cursor;
 
 use oxideav_core::{CodecResolver, Error as CoreError, Frame, ReadSeek, RuntimeContext};
 
-use crate::encoder::encode_to_tta1;
+use crate::encode;
 use crate::registry::{open_demuxer_for_test, register};
 
 /// Stub resolver used by the demuxer-open path (the TTA demuxer never
@@ -75,7 +75,7 @@ fn make_multi_frame_fixture() -> Fixture {
         }
     }
 
-    let bytes = encode_to_tta1(&pcm, channels, bps, sample_rate);
+    let bytes = encode(&pcm, channels, bps, sample_rate).expect("encode should succeed");
     Fixture {
         bytes,
         pcm,

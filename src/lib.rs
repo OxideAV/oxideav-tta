@@ -1,11 +1,13 @@
 //! Pure-Rust True Audio (TTA) lossless audio codec.
 //!
-//! **Round 2 — clean-room implementation.** This crate decodes TTA1
-//! format=1 (integer PCM) and format=2 (password-derived qm priming;
-//! `spec/07`) streams in pure safe Rust against the strict-isolation
-//! clean-room workspace at `docs/audio/tta-cleanroom/`. Round 2 also
-//! adds the spec/06 trace contract (debug build) and the
-//! `oxideav-core` framework integration.
+//! **Round 3 — clean-room implementation, encoder + decoder.** This
+//! crate decodes and encodes TTA1 format=1 (integer PCM) and format=2
+//! (password-derived qm priming; `spec/07`) streams in pure safe Rust
+//! against the strict-isolation clean-room workspace at
+//! `docs/audio/tta-cleanroom/`. Round 2 added the spec/06 trace
+//! contract (debug build) and the `oxideav-core` framework
+//! integration; round 3 promoted the test-only encoder to a public
+//! API that round-trips bit-exactly through the decoder.
 //!
 //! The decoder pipeline mirrors `spec/02..05`:
 //!
@@ -43,6 +45,12 @@
 //! - [`decode_with_password`] — same but for format=2 streams; the
 //!   password derives the eight-byte digest used to prime Stage-A's
 //!   `qm[]` per `spec/07` §3.
+//! - [`encode`] — single-shot encode of interleaved `i32` PCM into a
+//!   complete TTA1 format=1 byte stream (round-trips bit-exactly
+//!   through [`decode`]).
+//! - [`encode_with_password`] — format=2 encoder; the password seeds
+//!   Stage-A's `qm[]` priming at every per-channel frame init per
+//!   `spec/07` §3.5.
 //! - [`pack_pcm`] — convenience packer that converts the `i32` output
 //!   into the appropriate `i16` / 24-bit / `i32` little-endian byte
 //!   stream per `spec/01` §3.2.
@@ -59,7 +67,6 @@ mod bitreader;
 mod crc32;
 mod decoder;
 mod decorr;
-#[cfg(test)]
 mod encoder;
 mod error;
 mod header;
@@ -74,6 +81,7 @@ mod tables;
 mod trace;
 
 pub use crate::decoder::{decode_frame, Decoder};
+pub use crate::encoder::{encode, encode_with_password};
 pub use crate::error::{Error, Result};
 pub use crate::header::{FrameDescriptor, StreamHeader};
 

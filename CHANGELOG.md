@@ -8,6 +8,33 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-3: production TTA1 encoder. New public entry points
+  `encode(samples, channels, bits_per_sample, sample_rate)` and
+  `encode_with_password(.., password)` produce complete TTA1 byte
+  streams (header + seek table + frame blobs) from interleaved `i32`
+  PCM. The encoder is the symmetric inverse of the existing decoder:
+  forward channel decorrelation (`spec/04` §3.1), Stage-B prediction
+  subtraction (`spec/03` §4.3), Stage-A LMS step with residual
+  feedback (`spec/02` §4.2), zigzag + adaptive-Rice with the
+  decoder's lock-stepped `(k0, k1, sum0, sum1)` trackers (`spec/05`
+  §5.2 / §5.3), per-frame byte alignment + IEEE-802.3 CRC32
+  (`spec/01` §5.3 / §5.4), then header + seek table assembly
+  (`spec/01` §3 / §4). Output is bit-exactly round-trippable through
+  the existing `decode` / `decode_with_password` entry points across
+  every fixture in the existing test suite (16-bit / 24-bit,
+  1..=6 channels, silence / sine / pseudo-noise / DC+impulse / multi-
+  frame; format=1 + format=2). Replaces the previous `#[cfg(test)]`
+  internal encoder.
+- Round-3: framework `Encoder` impl wired through the existing
+  `registry` feature. The same `CodecInfo::new("tta")` registration
+  that already carried `decoder(make_decoder)` now also carries
+  `encoder(make_encoder)`, so `CodecRegistry::first_encoder(&params)`
+  returns a working TTA encoder. The adapter accepts interleaved
+  S16/S24 audio frames, buffers the PCM, and emits one self-contained
+  TTA1 file as a keyframe packet on `flush()`.
+- Round-3: new `Error::InvalidSampleBuffer` variant raised when the
+  encoder is handed an interleaved PCM buffer whose length is not a
+  multiple of the requested channel count.
 - Frame-boundary streaming demuxer + O(1) seek (`Demuxer::seek_to`)
   built on the TTA1 in-file seek table. Each demuxer packet is a
   self-contained mini-TTA1 file carrying exactly one audio frame

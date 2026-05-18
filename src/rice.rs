@@ -140,8 +140,7 @@ pub fn dezigzag(value: u32) -> i32 {
 }
 
 /// Inverse of `dezigzag` — maps a signed residual to its unsigned
-/// zigzag magnitude. Used by the test-only encoder (`crate::encoder`).
-#[cfg(test)]
+/// zigzag magnitude per `spec/05` §3.5. Used by [`crate::encoder`].
 #[inline]
 pub fn zigzag(e: i32) -> u32 {
     if e > 0 {

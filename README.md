@@ -5,11 +5,13 @@ Pure-Rust True Audio (TTA) lossless audio codec for the
 
 ## Status
 
-**Round 2 — clean-room decoder + framework integration + trace
-tape + format=2.** Decodes TTA1 format=1 (integer PCM) and format=2
-(password-derived qm priming, `spec/07`) streams in pure safe Rust
-against the strict-isolation clean-room workspace at
+**Round 3 — clean-room encoder + decoder + framework integration +
+trace tape + format=2.** Both encodes and decodes TTA1 format=1
+(integer PCM) and format=2 (password-derived qm priming, `spec/07`)
+streams in pure safe Rust against the strict-isolation clean-room
+workspace at
 [`docs/audio/tta-cleanroom/`](https://github.com/OxideAV/docs/tree/master/audio/tta-cleanroom).
+Encoder output round-trips bit-exactly through the decoder.
 
 The fresh orphan `master` is the starting point; the previous
 implementation, retired alongside the OxideAV docs audit dated
@@ -78,10 +80,30 @@ input to this rebuild.
   per-channel frame init. Plain `decode()` returns
   `Error::PasswordRequired` for format=2 streams.
 
-Still out of scope (no current asks): format=3 (IEEE float),
-production encoder, and bit-exact lockstep against libtta-encoded
-reference fixtures (needs a sanctioned fixture in
-`audit/reference-tapes/`).
+## What round 3 adds on top
+
+- **Production encoder** (`crate::encode`, `crate::encode_with_password`):
+  symmetric inverse of the decoder pipeline. Forward channel
+  decorrelation (`spec/04` §3.1), Stage-B prediction subtraction
+  (`spec/03` §4.3), Stage-A LMS step with residual feedback
+  (`spec/02` §4.2), zigzag + adaptive Rice with the lock-stepped
+  `(k0, k1, sum0, sum1)` trackers (`spec/05` §5.2 / §5.3), per-frame
+  byte alignment + IEEE-802.3 CRC32 (`spec/01` §5.3 / §5.4), then
+  header + seek table assembly (`spec/01` §3 / §4). Self-roundtrip is
+  bit-exact across every fixture in the existing test suite
+  (16-bit / 24-bit, 1..=6 channels, format=1 and format=2,
+  silence / sine / pseudo-noise / DC+impulse / multi-frame).
+- **Framework `Encoder` impl** wired through the `registry` feature:
+  the same `CodecInfo::new("tta")` registration that already carried
+  the decoder factory now also carries `encoder(make_encoder)`, so
+  `CodecRegistry::first_encoder(&params)` returns a working TTA
+  encoder. The adapter accepts interleaved S16/S24 audio frames,
+  buffers the PCM, and emits one self-contained TTA1 file as a
+  keyframe packet on `flush()`.
+
+Still out of scope (no current asks): format=3 (IEEE float) and
+bit-exact lockstep against libtta-encoded reference fixtures (needs
+a sanctioned fixture in `audit/reference-tapes/`).
 
 ## Why clean-room
 
@@ -94,12 +116,10 @@ FFmpeg-derived TTA source. The clean-room workspace at
 
 ## Verification
 
-The Implementer round 1 deliverable is decoder-only, but verification
-requires fixtures the workspace itself sanctions. The
-`audit/reference-tapes/**` and `reference/inputs/**` trees are
-gitignored, so round-1 verification is performed via a crate-internal
-test-only encoder (`#[cfg(test)] mod encoder`) that mirrors the
-decoder's state machines. Tests exercise:
+The `audit/reference-tapes/**` and `reference/inputs/**` trees are
+gitignored, so verification is performed via the crate's own
+production encoder, which mirrors the decoder's state machines.
+Tests exercise:
 
 - Per-spec hand-verifications transcribed from `spec/02..05` §7
   worked-step examples (Stage-A samples 0..2, Stage-B positive +

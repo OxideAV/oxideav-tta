@@ -10,10 +10,11 @@
 
 use oxideav_core::{
     AudioFrame, CodecCapabilities, CodecId, CodecInfo, CodecParameters, CodecRegistry,
-    CodecResolver, ContainerRegistry, Decoder, Demuxer, Error as CoreError, Frame, MediaType,
-    Packet, ProbeData, ReadSeek, Result as CoreResult, RuntimeContext, SampleFormat, StreamInfo,
-    TimeBase,
+    CodecResolver, ContainerRegistry, Decoder, Demuxer, Encoder, Error as CoreError, Frame,
+    MediaType, Packet, ProbeData, ReadSeek, Result as CoreResult, RuntimeContext, SampleFormat,
+    StreamInfo, TimeBase,
 };
+use std::collections::VecDeque;
 use std::io::Read;
 
 use crate::header::{
@@ -37,7 +38,8 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_STR))
             .capabilities(caps)
-            .decoder(make_decoder),
+            .decoder(make_decoder)
+            .encoder(make_encoder),
     );
 }
 
@@ -179,6 +181,199 @@ fn pcm_pack_for_format(samples: &[i32], output_format: SampleFormat) -> CoreResu
         }
     }
     Ok(out)
+}
+
+// ───────────────────────── Encoder impl ─────────────────────────
+
+/// Factory invoked by the framework's [`CodecRegistry`] when a caller
+/// requests a TTA encoder by `CodecId::new("tta")`. Validates the
+/// stream parameters up-front (the underlying [`crate::encode`] entry
+/// point applies the same validation per-call, but surfacing the
+/// error at construction time matches the contract every other audio
+/// encoder in the workspace follows).
+fn make_encoder(params: &CodecParameters) -> CoreResult<Box<dyn Encoder>> {
+    let output_format = params.sample_format.unwrap_or(SampleFormat::S16);
+    let bits_per_sample = match output_format {
+        SampleFormat::S16 => 16u16,
+        SampleFormat::S24 => 24u16,
+        other => {
+            return Err(CoreError::unsupported(format!(
+                "oxideav-tta encoder: unsupported sample format {other:?}"
+            )));
+        }
+    };
+    let channels = params
+        .channels
+        .ok_or_else(|| CoreError::invalid("oxideav-tta encoder: missing channels"))?;
+    if channels == 0 || channels > 6 {
+        return Err(CoreError::invalid(format!(
+            "oxideav-tta encoder: channels must be 1..=6 (got {channels})"
+        )));
+    }
+    let sample_rate = params
+        .sample_rate
+        .ok_or_else(|| CoreError::invalid("oxideav-tta encoder: missing sample_rate"))?;
+    if sample_rate == 0 || sample_rate > 0x007F_FFFF {
+        return Err(CoreError::invalid(format!(
+            "oxideav-tta encoder: sample_rate {sample_rate} outside 1..=0x7FFFFF"
+        )));
+    }
+
+    let mut output_params = params.clone();
+    output_params.media_type = MediaType::Audio;
+    output_params.codec_id = CodecId::new(CODEC_ID_STR);
+    output_params.channels = Some(channels);
+    output_params.sample_rate = Some(sample_rate);
+    output_params.sample_format = Some(output_format);
+
+    let time_base = TimeBase::new(1, sample_rate as i64);
+
+    Ok(Box::new(TtaEncoder {
+        output_params,
+        output_format,
+        channels,
+        bits_per_sample,
+        sample_rate,
+        time_base,
+        interleaved: Vec::new(),
+        pending: VecDeque::new(),
+        next_pts: 0,
+        eof: false,
+    }))
+}
+
+/// TTA encoder adapter — buffers interleaved `i32` PCM from incoming
+/// audio frames, then on `flush` runs the existing single-shot
+/// [`crate::encode`] over the whole buffer and emits the resulting
+/// self-contained TTA1 file as one keyframe packet.
+///
+/// This matches the demuxer's per-stream packet shape: the demuxer
+/// emits one mini-TTA1 file per audio frame, and the encoder produces
+/// one TTA1 file per buffered run. The framework can then mux the
+/// bytes into any container that carries a TTA payload.
+struct TtaEncoder {
+    output_params: CodecParameters,
+    output_format: SampleFormat,
+    channels: u16,
+    bits_per_sample: u16,
+    sample_rate: u32,
+    time_base: TimeBase,
+    /// Accumulated interleaved `i32` PCM (channel-then-sample).
+    interleaved: Vec<i32>,
+    /// Packets ready to hand out via `receive_packet`.
+    pending: VecDeque<Packet>,
+    /// PTS for the next emitted packet, in `1 / sample_rate` units.
+    next_pts: i64,
+    eof: bool,
+}
+
+impl TtaEncoder {
+    fn ingest_frame(&mut self, a: &AudioFrame) -> CoreResult<()> {
+        let data = a
+            .data
+            .first()
+            .ok_or_else(|| CoreError::invalid("oxideav-tta encoder: empty audio frame"))?;
+        match self.output_format {
+            SampleFormat::S16 => {
+                if data.len() % 2 != 0 {
+                    return Err(CoreError::invalid(
+                        "oxideav-tta encoder: S16 buffer length is not a multiple of 2",
+                    ));
+                }
+                for chunk in data.chunks_exact(2) {
+                    self.interleaved
+                        .push(i16::from_le_bytes([chunk[0], chunk[1]]) as i32);
+                }
+            }
+            SampleFormat::S24 => {
+                if data.len() % 3 != 0 {
+                    return Err(CoreError::invalid(
+                        "oxideav-tta encoder: S24 buffer length is not a multiple of 3",
+                    ));
+                }
+                for chunk in data.chunks_exact(3) {
+                    // Sign-extend 24-bit two's-complement little-endian
+                    // into i32 (high byte fill).
+                    let mut v =
+                        (chunk[0] as i32) | ((chunk[1] as i32) << 8) | ((chunk[2] as i32) << 16);
+                    if v & 0x0080_0000 != 0 {
+                        v |= 0xFF00_0000_u32 as i32;
+                    }
+                    self.interleaved.push(v);
+                }
+            }
+            other => {
+                return Err(CoreError::unsupported(format!(
+                    "oxideav-tta encoder: unsupported sample format {other:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn flush_to_packet(&mut self) -> CoreResult<()> {
+        let nch = self.channels as usize;
+        if self.interleaved.is_empty() {
+            return Ok(());
+        }
+        if self.interleaved.len() % nch != 0 {
+            return Err(CoreError::invalid(
+                "oxideav-tta encoder: accumulated PCM not a multiple of channel count",
+            ));
+        }
+        let samples_per_channel = (self.interleaved.len() / nch) as i64;
+        let bytes = crate::encode(
+            &self.interleaved,
+            self.channels,
+            self.bits_per_sample,
+            self.sample_rate,
+        )
+        .map_err(|e| CoreError::other(format!("oxideav-tta encoder: {e}")))?;
+        let mut pkt = Packet::new(0, self.time_base, bytes);
+        pkt.pts = Some(self.next_pts);
+        pkt.dts = Some(self.next_pts);
+        pkt.duration = Some(samples_per_channel);
+        pkt.flags.keyframe = true;
+        self.pending.push_back(pkt);
+        self.next_pts = self.next_pts.saturating_add(samples_per_channel);
+        self.interleaved.clear();
+        Ok(())
+    }
+}
+
+impl Encoder for TtaEncoder {
+    fn codec_id(&self) -> &CodecId {
+        &self.output_params.codec_id
+    }
+
+    fn output_params(&self) -> &CodecParameters {
+        &self.output_params
+    }
+
+    fn send_frame(&mut self, frame: &Frame) -> CoreResult<()> {
+        match frame {
+            Frame::Audio(a) => self.ingest_frame(a),
+            other => Err(CoreError::invalid(format!(
+                "oxideav-tta encoder: expected audio frame, got {other:?}"
+            ))),
+        }
+    }
+
+    fn receive_packet(&mut self) -> CoreResult<Packet> {
+        self.pending.pop_front().ok_or(if self.eof {
+            CoreError::Eof
+        } else {
+            CoreError::NeedMore
+        })
+    }
+
+    fn flush(&mut self) -> CoreResult<()> {
+        if !self.eof {
+            self.flush_to_packet()?;
+            self.eof = true;
+        }
+        Ok(())
+    }
 }
 
 // ───────────────────────── Demuxer impl ─────────────────────────
@@ -439,7 +634,7 @@ mod tests {
     use std::io::Cursor;
     use std::sync::Arc;
 
-    use crate::encoder::encode_to_tta1;
+    use crate::encode;
 
     struct NoopResolver;
     impl CodecResolver for NoopResolver {
@@ -452,7 +647,7 @@ mod tests {
         // 0.05 s of mono 16-bit silence at 44.1 kHz → one frame.
         let n = 2_048;
         let samples = vec![0i32; n];
-        encode_to_tta1(&samples, 1, 16, 44_100)
+        encode(&samples, 1, 16, 44_100).expect("encode should succeed")
     }
 
     #[test]
@@ -472,6 +667,64 @@ mod tests {
             }
         }
         assert!(found, "container registration should install a demuxer");
+    }
+
+    #[test]
+    fn registry_exposes_encoder_factory() {
+        let mut ctx = RuntimeContext::new();
+        register(&mut ctx);
+        let codec_id = CodecId::new(CODEC_ID_STR);
+        assert!(
+            ctx.codecs.has_encoder(&codec_id),
+            "codec registration should install an encoder factory"
+        );
+    }
+
+    #[test]
+    fn end_to_end_encode_then_decode_via_registry() {
+        // Build params for a mono S16 44.1 kHz stream, ask the registry
+        // for an encoder + decoder, drive both, and check that the
+        // round-tripped PCM is sample-identical to the original.
+        let mut ctx = RuntimeContext::new();
+        register(&mut ctx);
+
+        let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
+        params.media_type = MediaType::Audio;
+        params.channels = Some(1);
+        params.sample_rate = Some(44_100);
+        params.sample_format = Some(SampleFormat::S16);
+
+        let mut enc = ctx.codecs.first_encoder(&params).expect("encoder factory");
+
+        // 0.05 s of a 440 Hz sine at amplitude 8000.
+        let n = (44_100.0 * 0.05) as usize;
+        let mut pcm_bytes = Vec::with_capacity(n * 2);
+        let mut pcm_i32 = Vec::with_capacity(n);
+        for s in 0..n {
+            let phase = 2.0 * std::f64::consts::PI * 440.0 * s as f64 / 44_100.0;
+            let v = (phase.sin() * 8_000.0).round() as i16;
+            pcm_bytes.extend_from_slice(&v.to_le_bytes());
+            pcm_i32.push(v as i32);
+        }
+        let frame = Frame::Audio(AudioFrame {
+            samples: n as u32,
+            pts: Some(0),
+            data: vec![pcm_bytes],
+        });
+        enc.send_frame(&frame).expect("send_frame");
+        enc.flush().expect("flush");
+        let pkt = enc.receive_packet().expect("receive_packet");
+        assert!(pkt.flags.keyframe);
+        assert_eq!(pkt.duration, Some(n as i64));
+
+        // Round-trip through the public decode entry point.
+        let (info, decoded_i32) = crate::decode(&pkt.data).expect("decode encoder output");
+        assert_eq!(info.format, 1);
+        assert_eq!(info.channels, 1);
+        assert_eq!(info.bits_per_sample, 16);
+        assert_eq!(info.sample_rate, 44_100);
+        assert_eq!(info.total_samples as usize, n);
+        assert_eq!(decoded_i32, pcm_i32);
     }
 
     #[test]
