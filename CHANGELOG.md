@@ -6,6 +6,17 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OxideAV/oxideav-tta/compare/v0.0.1...v0.0.2) - 2026-05-18
+
+### Other
+
+- Round 3 — production TTA1 encoder + framework Encoder impl
+- O(1) seek via TTA1 in-file seek table
+- Round 2 — spec/06 trace + oxideav-core integration + format=2 password
+- vendor lms-shift.csv + lms-dx-magnitudes.csv into the crate
+- Round 1 — TTA1 format=1 decoder against the clean-room workspace
+- Round 0 — clean-room rebuild scaffold (orphan master)
+
 ### Added
 
 - Round-3: production TTA1 encoder. New public entry points
