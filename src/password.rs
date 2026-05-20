@@ -37,9 +37,9 @@ const POLY: u64 = 0x42F0E1EB_A9EA3693;
 /// Compute the ECMA-182 CRC-64 of `data`, MSB-first per spec/07 §3.2.
 /// Uses on-the-fly bit-serial computation (no 256-entry table); the
 /// password is at most a handful of bytes per decoder lifetime so the
-/// table-driven optimisation libtta uses is not worth the static
-/// data-segment overhead. Both forms produce identical digests
-/// (spec/07 §3.3 explicitly notes the equivalence).
+/// table-driven optimisation is not worth the static data-segment
+/// overhead. Both forms produce identical digests (spec/07 §3.3
+/// explicitly notes the equivalence).
 pub fn crc64_ecma182(data: &[u8]) -> u64 {
     let mut crc: u64 = 0xFFFF_FFFF_FFFF_FFFF;
     for &b in data {
@@ -77,7 +77,7 @@ pub fn derive_qm_priming(password: &[u8]) -> [i32; 8] {
 mod tests {
     use super::*;
 
-    /// libtta-flavoured CRC-64 (spec/07 §3.2): polynomial
+    /// TTA-spec CRC-64 (spec/07 §3.2): polynomial
     /// `0x42F0E1EBA9EA3693`, MSB-first / not-reflected, init and
     /// final-XOR both `0xFFFFFFFFFFFFFFFF`. This is NOT identical to
     /// the standard CRC-64/XZ (which is reflected) — the standard

@@ -21,8 +21,7 @@ const MAGIC: &[u8; 4] = b"TTA1";
 /// Workspace-policy ceiling on the 32-bit `sample_rate` field
 /// (`spec/01` §3.3 — high bit reserved as a forward-compat flag).
 const MAX_SAMPLE_RATE: u32 = 0x007F_FFFF;
-/// libtta `MAX_NCH` (`reference/source/libtta/libtta.h:37`, cited via
-/// `spec/01` §3 / `spec/04` §4).
+/// `MAX_NCH` per `spec/01` §3 / `spec/04` §4.
 const MAX_NCH: u16 = 6;
 
 /// Parsed TTA1 stream header.
@@ -199,8 +198,8 @@ pub fn parse_stream_header_any_format(buf: &[u8]) -> Result<(StreamHeader, usize
 /// caller's responsibility (it equals the post-ID3v2 offset of the
 /// stream header plus 22 plus the seek table size).
 ///
-/// Per spec §4.3, a seek-table CRC failure does NOT abort the decode
-/// in libtta; this implementation flags the failure to the caller via
+/// Per spec §4.3, a seek-table CRC failure is non-fatal; this
+/// implementation flags the failure to the caller via
 /// [`SeekTable::crc_ok`] but still returns a usable list, leaving the
 /// caller to decide whether to continue.
 #[derive(Debug, Clone)]

@@ -18,18 +18,17 @@ pub enum Error {
     /// 2 (encrypted) and format 3 (IEEE float) are out of scope for the
     /// round-1 deliverable.
     UnsupportedFormat(u16),
-    /// `bits_per_sample` was outside the libtta-2.3-supported range
-    /// `16..=24`. The decoder rejects 8-bit and 32-bit streams the same
-    /// way the format author's reference does.
+    /// `bits_per_sample` was outside the in-scope range `16..=24`. The
+    /// decoder rejects 8-bit and 32-bit streams per `spec/01` §3.
     UnsupportedBitDepth(u16),
-    /// `channels` was zero or above the libtta `MAX_NCH = 6` cap.
+    /// `channels` was zero or above the `MAX_NCH = 6` cap (`spec/01` §3).
     UnsupportedChannelCount(u16),
     /// `sample_rate` exceeded the workspace-policy ceiling of `0x7FFFFF`
     /// Hz (the reserved-high-bit boundary documented in `spec/01` §3.3).
     UnsupportedSampleRate(u32),
     /// The header carried `format == 2` (encrypted) but no password
-    /// was supplied to the decoder. Mirror of libtta's
-    /// `TTA_PASSWORD_ERROR` per `spec/07` §7. Use
+    /// was supplied to the decoder. Surfaces the spec-defined
+    /// password-required failure per `spec/07` §7. Use
     /// [`crate::decode_with_password`] to supply one.
     PasswordRequired,
     /// The interleaved PCM buffer handed to [`crate::encode`] /

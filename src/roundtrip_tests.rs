@@ -339,7 +339,7 @@ fn pcm_pack_round_trip_24bit() {
 fn header_validation_rejects_format_2_without_password() {
     // Build a header that claims format=2 (encrypted) and verify the
     // password-less `decode` entry point surfaces PasswordRequired
-    // (mirror of libtta's TTA_PASSWORD_ERROR per spec/07 §7).
+    // (the spec-defined password-required failure per spec/07 §7).
     let mut buf = Vec::new();
     buf.extend_from_slice(b"TTA1");
     buf.extend_from_slice(&2u16.to_le_bytes()); // format
