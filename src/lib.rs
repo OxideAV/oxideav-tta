@@ -79,11 +79,13 @@ mod stage_b;
 mod tables;
 #[cfg(feature = "trace")]
 mod trace;
+mod trailers;
 
 pub use crate::decoder::{decode_frame, Decoder};
 pub use crate::encoder::{encode, encode_with_password};
 pub use crate::error::{Error, Result};
 pub use crate::header::{FrameDescriptor, StreamHeader};
+pub use crate::trailers::{detect_trailers, TrailerInfo};
 
 /// Re-exported alias for the parsed stream header. [`StreamInfo`] is
 /// the same type as [`StreamHeader`] under a more public-friendly
@@ -137,6 +139,39 @@ pub fn decode_with_password(bytes: &[u8], password: &[u8]) -> Result<(StreamInfo
         dec.decode_all()?
     };
     Ok((header, pcm))
+}
+
+/// Scan a TTA1 byte buffer for optional ID3v1 / APEv2 trailers per
+/// `spec/01` §7.
+///
+/// Walks the (optional) ID3v2 prefix + stream header + seek table to
+/// compute the byte offset of the last frame's end, then defers to
+/// [`detect_trailers`] for the actual signature scan. Returns the
+/// detected [`TrailerInfo`] (possibly empty); errors only when the
+/// framing itself is malformed (which would also fail
+/// [`decode`]/[`Decoder::new`]).
+pub fn scan_trailers(bytes: &[u8]) -> Result<TrailerInfo> {
+    // The Decoder constructor accepts both format=1 and format=2
+    // headers; we don't need to actually decode anything to compute
+    // the end-of-stream offset, so use `new_with_priming(_, None)`
+    // and ignore the PasswordRequired guard by reading the header
+    // directly when format == 2.
+    let id3_skip = crate::header::skip_id3v2_prefix(bytes)?;
+    let after_id3 = &bytes[id3_skip..];
+    let (header, hdr_len) = crate::header::parse_stream_header_any_format(after_id3)?;
+    let (frame_count, _) = header.frame_geometry();
+    let seek_table_len = (frame_count as usize) * 4 + 4;
+    let frame_data_start = (id3_skip + hdr_len + seek_table_len) as u64;
+    let seek_table_input = &after_id3[hdr_len..];
+    let (seek_table, _) =
+        crate::header::parse_seek_table(seek_table_input, &header, frame_data_start)?;
+    let eos = if let Some(last) = seek_table.frames.last() {
+        (last.file_offset as usize).saturating_add(last.disk_size as usize)
+    } else {
+        // Zero-frame stream — the file ends at the seek-table CRC.
+        id3_skip + hdr_len + seek_table_len
+    };
+    Ok(detect_trailers(bytes, eos))
 }
 
 /// Pack interleaved `i32` PCM samples into the appropriate

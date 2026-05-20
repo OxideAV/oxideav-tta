@@ -418,6 +418,82 @@ fn format2_wrong_password_corrupts_decode() {
 }
 
 #[test]
+fn scan_trailers_finds_id3v1_appended_to_real_tta_file() {
+    // Build a real TTA1 file via the production encoder, then append
+    // a synthetic 128-byte ID3v1 trailer. `scan_trailers` should
+    // pick it up without disturbing the decode path.
+    let n = 256;
+    let samples = sine(n, 1, 44_100, 440.0, 4_000);
+    let mut tta = encode(&samples, 1, 16, 44_100).expect("encode should succeed");
+    let eos = tta.len();
+    tta.extend_from_slice(b"TAG");
+    tta.extend(std::iter::repeat(0u8).take(125));
+    assert_eq!(tta.len(), eos + 128);
+
+    // Decode still succeeds end-to-end (the trailer sits past the
+    // last frame's CRC, outside the TTA1-level scope per spec/01 §7).
+    let (_, decoded) = decode(&tta).expect("decode succeeds despite trailing tag");
+    assert_eq!(decoded, samples);
+
+    let info = crate::scan_trailers(&tta).expect("trailer scan");
+    assert_eq!(info.id3v1, Some((eos, 128)));
+    assert_eq!(info.apev2, None);
+}
+
+#[test]
+fn scan_trailers_finds_apev2_footer_only() {
+    let n = 256;
+    let samples = sine(n, 1, 44_100, 440.0, 4_000);
+    let mut tta = encode(&samples, 1, 16, 44_100).expect("encode should succeed");
+    let eos = tta.len();
+    // Build an APEv2 footer-only region with a 50-byte body.
+    let body_size = 50;
+    tta.extend(std::iter::repeat(0xAAu8).take(body_size));
+    tta.extend_from_slice(b"APETAGEX");
+    tta.extend_from_slice(&2000u32.to_le_bytes());
+    tta.extend_from_slice(&((body_size + 32) as u32).to_le_bytes());
+    tta.extend_from_slice(&1u32.to_le_bytes()); // item_count
+    tta.extend_from_slice(&0x2000_0000u32.to_le_bytes()); // flags (is_footer)
+    tta.extend_from_slice(&[0u8; 8]); // reserved
+
+    let info = crate::scan_trailers(&tta).expect("trailer scan");
+    assert_eq!(info.id3v1, None);
+    assert_eq!(info.apev2, Some((eos, body_size + 32)));
+}
+
+#[test]
+fn scan_trailers_finds_both_with_ape_immediately_before_id3v1() {
+    let n = 256;
+    let samples = sine(n, 1, 44_100, 440.0, 4_000);
+    let mut tta = encode(&samples, 1, 16, 44_100).expect("encode should succeed");
+    let eos = tta.len();
+    let body_size = 20;
+    tta.extend(std::iter::repeat(0xAAu8).take(body_size));
+    tta.extend_from_slice(b"APETAGEX");
+    tta.extend_from_slice(&2000u32.to_le_bytes());
+    tta.extend_from_slice(&((body_size + 32) as u32).to_le_bytes());
+    tta.extend_from_slice(&1u32.to_le_bytes());
+    tta.extend_from_slice(&0x2000_0000u32.to_le_bytes());
+    tta.extend_from_slice(&[0u8; 8]);
+    let ape_end = tta.len();
+    tta.extend_from_slice(b"TAG");
+    tta.extend(std::iter::repeat(0u8).take(125));
+
+    let info = crate::scan_trailers(&tta).expect("trailer scan");
+    assert_eq!(info.id3v1, Some((ape_end, 128)));
+    assert_eq!(info.apev2, Some((eos, body_size + 32)));
+}
+
+#[test]
+fn scan_trailers_returns_empty_on_clean_tta_file() {
+    let n = 256;
+    let samples = sine(n, 1, 44_100, 440.0, 4_000);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode should succeed");
+    let info = crate::scan_trailers(&tta).expect("trailer scan");
+    assert!(info.is_empty(), "no trailers expected on a fresh encode");
+}
+
+#[test]
 fn corrupted_frame_crc_detected() {
     let n = 256;
     let samples = sine(n, 1, 44_100, 440.0, 4_000);

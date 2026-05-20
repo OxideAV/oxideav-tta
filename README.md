@@ -5,8 +5,9 @@ Pure-Rust True Audio (TTA) lossless audio codec for the
 
 ## Status
 
-**Round 3 — clean-room encoder + decoder + framework integration +
-trace tape + format=2.** Both encodes and decodes TTA1 format=1
+**Round 4 — clean-room encoder + decoder + framework integration +
+trace tape + format=2 + ID3v1/APEv2 trailer detection.** Both encodes
+and decodes TTA1 format=1
 (integer PCM) and format=2 (password-derived qm priming, `spec/07`)
 streams in pure safe Rust against the strict-isolation clean-room
 workspace at
@@ -100,6 +101,23 @@ input to this rebuild.
   encoder. The adapter accepts interleaved S16/S24 audio frames,
   buffers the PCM, and emits one self-contained TTA1 file as a
   keyframe packet on `flush()`.
+
+## What round 4 adds on top
+
+- **ID3v1 / APEv2 trailer detection** per `spec/01` §7: a new
+  [`scan_trailers`] / [`detect_trailers`] pair that walks the
+  optional ID3v2 prefix + stream header + seek table to compute the
+  end-of-stream byte boundary, then signature-scans the post-stream
+  region for the ID3v1 `'TAG'` magic (fixed 128-byte trailer at file
+  end) and / or the APEv2 `'APETAGEX'` footer magic (32-byte footer
+  with embedded `tag_size` + optional 32-byte header sentinel). The
+  scanner returns absolute `(start, len)` byte ranges and never
+  reads bytes inside the TTA1 frame region — out-of-stream metadata
+  is host-app territory per spec §7. Bogus APE `tag_size` values
+  that would overrun the post-stream region are rejected silently
+  (the trailer is treated as "not present" rather than as a parse
+  error, mirroring libtta's silent passthrough behaviour for
+  trailers).
 
 Still out of scope (no current asks): format=3 (IEEE float) and
 bit-exact lockstep against libtta-encoded reference fixtures (needs

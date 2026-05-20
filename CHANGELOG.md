@@ -8,6 +8,22 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-4: ID3v1 / APEv2 trailer detection per `spec/01` §7. New
+  public entry points `scan_trailers(bytes) -> Result<TrailerInfo>`
+  (parses the optional ID3v2 prefix + stream header + seek table to
+  compute the end-of-stream byte boundary, then signature-scans the
+  post-stream region) and `detect_trailers(bytes, eos_off) ->
+  TrailerInfo` (signature-scans a region given an explicit
+  end-of-stream offset; never reads bytes inside the TTA1 frame
+  region). `TrailerInfo` exposes `id3v1` / `apev2` as absolute
+  `(start, len)` byte ranges. ID3v1 detection follows spec §7's
+  "last 128 bytes start with `'T','A','G'`" rule; APEv2 detection
+  reads the 32-byte footer's `tag_size` field (LE u32 at footer
+  offset 12) plus the "has-header" flag (footer offset 20, bit 31)
+  to recover the full APE region span. Bogus `tag_size` values that
+  would overrun the post-stream region are silently rejected (the
+  trailer is reported as "not present"). Out-of-stream metadata
+  parsing itself remains host-application territory per spec §7.
 - Round-3: production TTA1 encoder. New public entry points
   `encode(samples, channels, bits_per_sample, sample_rate)` and
   `encode_with_password(.., password)` produce complete TTA1 byte
