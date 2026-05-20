@@ -2,10 +2,10 @@
 //!
 //! TTA1's framing layer ends at the last frame's trailing CRC. Any
 //! bytes that appear past `frame_start[N-1] + seek_table_entry[N-1]`
-//! are out-of-stream metadata containers — libtta itself parses
-//! neither, but a TTA-aware host application typically wants to know
-//! whether the file carries an ID3v1 trailer, an APEv2 trailer, both,
-//! or neither, so it can preserve them on re-encode.
+//! are out-of-stream metadata containers — the TTA codec does not
+//! decode them, but a TTA-aware host application typically wants to
+//! know whether the file carries an ID3v1 trailer, an APEv2 trailer,
+//! both, or neither, so it can preserve them on re-encode.
 //!
 //! Per spec §7 the detection rules are:
 //!
