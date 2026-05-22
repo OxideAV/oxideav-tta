@@ -128,7 +128,7 @@ pub fn skip_id3v2_prefix(buf: &[u8]) -> Result<usize> {
 /// validated field is malformed/out-of-scope.
 #[allow(dead_code)] // exercised by header tests; round-2 hot path uses parse_stream_header_any_format.
 pub fn parse_stream_header(buf: &[u8]) -> Result<(StreamHeader, usize)> {
-    let (header, n) = parse_stream_header_any_format(buf)?;
+    let (header, n, _crc) = parse_stream_header_with_crc(buf)?;
     if header.format != 1 {
         return Err(Error::UnsupportedFormat(header.format));
     }
@@ -140,7 +140,28 @@ pub fn parse_stream_header(buf: &[u8]) -> Result<(StreamHeader, usize)> {
 /// (password-derived qm priming, spec/07). The caller is responsible
 /// for refusing format=2 when no password is supplied. Other formats
 /// (3 IEEE float, ...) are still rejected.
+///
+/// This wrapper drops the computed CRC for callers that don't need it
+/// in their trace output; [`parse_stream_header_with_crc`] is the
+/// underlying entry that surfaces the freshly-computed IEEE-802.3
+/// CRC32 alongside the header for downstream `HEADER_CRC` trace
+/// emission per spec/06 §5.1 (closes audit/07 §6.2-3).
 pub fn parse_stream_header_any_format(buf: &[u8]) -> Result<(StreamHeader, usize)> {
+    let (h, n, _crc) = parse_stream_header_with_crc(buf)?;
+    Ok((h, n))
+}
+
+/// Like [`parse_stream_header_any_format`] but also returns the
+/// freshly-computed IEEE-802.3 CRC32 over the 18 header-body bytes
+/// (`spec/01` §3.5).
+///
+/// Callers that emit a spec/06 `HEADER_CRC` trace event use this
+/// entry point so the `computed_crc` field carries the real value
+/// rather than a placeholder zero. Functionally equivalent to the
+/// non-`_with_crc` variant — the parser would have rejected the
+/// header at the CRC check if the value did not match the on-disk
+/// CRC bytes.
+pub fn parse_stream_header_with_crc(buf: &[u8]) -> Result<(StreamHeader, usize, u32)> {
     if buf.len() < HEADER_LEN {
         return Err(Error::Truncated);
     }
@@ -186,6 +207,7 @@ pub fn parse_stream_header_any_format(buf: &[u8]) -> Result<(StreamHeader, usize
             total_samples,
         },
         HEADER_LEN,
+        computed,
     ))
 }
 

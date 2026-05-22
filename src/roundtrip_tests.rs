@@ -507,3 +507,286 @@ fn corrupted_frame_crc_detected() {
         Err(crate::Error::Crc32Mismatch { region: "frame" })
     ));
 }
+
+#[test]
+fn roundtrip_format2_multi_frame_44100_mono() {
+    // 2.5 s at 44.1 kHz spans 3 frames (regular_frame_samples = 46080;
+    // last frame = 110250 - 92160 = 18090). Spec/07 §3.6 requires the
+    // password-derived qm priming to be re-applied at EVERY frame init,
+    // not just frame 0. The audit/07 §6.2-5 follow-up flagged that
+    // single-frame coverage cannot tell the spec-correct behaviour
+    // (re-prime per frame) apart from a buggy "prime once at frame 0
+    // only" implementation; multi-frame round-trip exposes the bug
+    // because LMS state is no longer all-zero on frame 1 entry, so
+    // an unprimed qm would diverge from the encoder's primed-qm
+    // residuals on the first sample of frame 1.
+    let n = 110_250;
+    let samples = sine(n, 1, 44_100, 440.0, 14_000);
+    let password = b"multi-frame format2 verification";
+    let tta = encode_with_password(&samples, 1, 16, 44_100, password)
+        .expect("multi-frame format=2 encode should succeed");
+    let (info, decoded) =
+        decode_with_password(&tta, password).expect("password-aware decode should succeed");
+    assert_eq!(info.format, 2);
+    assert_eq!(info.channels, 1);
+    assert_eq!(info.total_samples as usize, n);
+    let regular = (44_100u64 * 256 / 245) as u32;
+    let (frame_count, _) = info.frame_geometry();
+    assert!(
+        frame_count >= 3,
+        "fixture must span ≥ 3 frames; regular={regular}, frame_count={frame_count}"
+    );
+    assert_eq!(decoded, samples);
+}
+
+#[test]
+fn roundtrip_format2_multi_frame_44100_stereo() {
+    // Multi-frame stereo: same per-frame qm-reset rule (spec/07 §3.6)
+    // plus the per-frame Stage-A state reset for both channels per
+    // spec/02 §3.1. Two channels share the SAME priming digest per
+    // spec/07 §3.5.
+    let n_per_ch = 110_250;
+    let mut samples = Vec::with_capacity(n_per_ch * 2);
+    for s in 0..n_per_ch {
+        let phase_l = 2.0 * std::f64::consts::PI * 440.0 * s as f64 / 44_100.0;
+        let phase_r = 2.0 * std::f64::consts::PI * 660.0 * s as f64 / 44_100.0;
+        samples.push((phase_l.sin() * 12_000.0).round() as i32);
+        samples.push((phase_r.sin() * 9_000.0).round() as i32);
+    }
+    let password = b"stereo multi-frame";
+    let tta = encode_with_password(&samples, 2, 16, 44_100, password)
+        .expect("multi-frame stereo format=2 encode should succeed");
+    let (info, decoded) =
+        decode_with_password(&tta, password).expect("stereo decode should succeed");
+    assert_eq!(info.format, 2);
+    assert_eq!(info.channels, 2);
+    let (frame_count, _) = info.frame_geometry();
+    assert!(frame_count >= 3);
+    assert_eq!(decoded, samples);
+}
+
+#[test]
+fn decode_with_password_format1_succeeds_with_clear_priming() {
+    // Regression test for audit/07 §6.2-2: when format=1 bytes are
+    // handed to decode_with_password, the priming must be cleared
+    // (qm zero-init at every frame per spec/02 §3.1) without the
+    // header / seek-table being re-parsed. We can't directly observe
+    // the absence of a re-parse from outside, but we can confirm the
+    // decoded PCM equals the plain-decode result; if the priming had
+    // bled through it would produce a different sample stream because
+    // spec/02 §4.2 STEP 1's sign-LMS gate would fire on a non-zero
+    // qm[] from sample 0 of frame 0.
+    let n = 1_024;
+    let samples = sine(n, 1, 44_100, 440.0, 8_000);
+    let tta = encode(&samples, 1, 16, 44_100).expect("format=1 encode should succeed");
+    let (info_plain, decoded_plain) = decode(&tta).expect("plain decode");
+    let (info_pwd, decoded_pwd) =
+        decode_with_password(&tta, b"any password").expect("password-aware decode of format=1");
+    assert_eq!(info_plain.format, 1);
+    assert_eq!(info_pwd.format, 1);
+    assert_eq!(decoded_plain, samples);
+    assert_eq!(decoded_pwd, samples);
+    assert_eq!(decoded_plain, decoded_pwd);
+}
+
+#[cfg(feature = "trace")]
+#[test]
+fn trace_tape_header_crc_carries_real_value() {
+    // audit/07 §6.2-3 regression: the HEADER_CRC event's `computed_crc`
+    // field must carry the freshly-parsed IEEE-802.3 CRC32 over the 18
+    // header-body bytes (`spec/01` §3.5), NOT a placeholder zero. We
+    // synthesize a fixture, extract its on-disk header CRC (bytes 18..22
+    // little-endian), and assert the tape's `HEADER_CRC computed_crc`
+    // hex field matches.
+    let tmp = std::env::temp_dir().join("oxideav-tta-trace-header-crc.tsv");
+    if tmp.exists() {
+        std::fs::remove_file(&tmp).unwrap();
+    }
+    crate::trace::set_thread_trace_path(Some(tmp.clone()));
+
+    let n = 256;
+    let samples = sine(n, 1, 44_100, 440.0, 8_000);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let on_disk_crc = u32::from_le_bytes(tta[18..22].try_into().unwrap());
+
+    let (_info, _decoded) = decode(&tta).expect("decode");
+    crate::trace::set_thread_trace_path(None);
+
+    let tape = std::fs::read_to_string(&tmp).expect("tape was written");
+    let header_crc_line = tape
+        .lines()
+        .find(|l| l.starts_with("ev=HEADER_CRC\t"))
+        .expect("tape carries a HEADER_CRC line");
+    // The hex field is encoded as `computed_crc=0xXXXXXXXX`.
+    let needle = format!("computed_crc=0x{:08x}", on_disk_crc);
+    assert!(
+        header_crc_line.contains(&needle),
+        "HEADER_CRC line `{header_crc_line}` must contain `{needle}` \
+         (on-disk header CRC; placeholder-zero would be 0x00000000)"
+    );
+    assert!(
+        on_disk_crc != 0,
+        "fixture's on-disk header CRC must be non-zero so the assertion above \
+         actually proves the placeholder bug is gone"
+    );
+    assert!(header_crc_line.contains("crc_ok=1"));
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[cfg(feature = "trace")]
+#[test]
+fn trace_tape_format2_qm_priming_reapplied_every_frame() {
+    // audit/07 §6.2-5 follow-up: spec/07 §3.6 says the password-derived
+    // qm priming reapplies at EVERY frame init, not just frame 0. A
+    // multi-frame format=2 trace tape lets us inspect the `LMS_PRE`
+    // event at `step_idx=0` of each frame and confirm the same eight
+    // qm bytes (= digest sign-extended int8 → int32) appear there
+    // regardless of frame index.
+    let tmp = std::env::temp_dir().join("oxideav-tta-trace-fmt2-multi.tsv");
+    if tmp.exists() {
+        std::fs::remove_file(&tmp).unwrap();
+    }
+    crate::trace::set_thread_trace_path(Some(tmp.clone()));
+
+    // 2.5 s = 110 250 samples → 3 frames at 44.1 kHz.
+    let n = 110_250;
+    let samples = sine(n, 1, 44_100, 440.0, 10_000);
+    let password = b"trace multi-frame format2";
+    let tta = encode_with_password(&samples, 1, 16, 44_100, password).expect("encode");
+    let (_info, _decoded) = decode_with_password(&tta, password).expect("decode");
+    crate::trace::set_thread_trace_path(None);
+
+    // Derive the expected qm priming bytes the same way `password.rs`
+    // does: ECMA-182 CRC-64 of `password`, little-endian byte unpacking,
+    // sign-extended int8 → int32 (spec/07 §3.4 / §3.5).
+    let expected_qm = crate::password::derive_qm_priming(password);
+
+    let tape = std::fs::read_to_string(&tmp).expect("tape was written");
+    // Locate every `LMS_PRE` event at `step_idx=0 channel=0`. There
+    // must be one per frame in a mono fixture, and every one must
+    // carry the same eight `qm_pre` values.
+    let mut frame_qm_pres: Vec<Vec<i32>> = Vec::new();
+    for line in tape.lines() {
+        if !line.starts_with("ev=LMS_PRE\t") {
+            continue;
+        }
+        // Parse the field-record `key=value\t...` pairs.
+        let mut step_idx: Option<u32> = None;
+        let mut channel: Option<u32> = None;
+        let mut qm_pre: Option<Vec<i32>> = None;
+        for rec in line.split('\t').skip(1) {
+            let (k, v) = rec.split_once('=').expect("malformed key=value");
+            match k {
+                "step_idx" => step_idx = Some(v.parse().unwrap()),
+                "channel" => channel = Some(v.parse().unwrap()),
+                "qm_pre" => {
+                    qm_pre = Some(v.split(',').map(|s| s.parse::<i32>().unwrap()).collect())
+                }
+                _ => {}
+            }
+        }
+        if step_idx == Some(0) && channel == Some(0) {
+            frame_qm_pres.push(qm_pre.expect("LMS_PRE always carries qm_pre"));
+        }
+    }
+    assert!(
+        frame_qm_pres.len() >= 3,
+        "multi-frame fixture must produce ≥ 3 LMS_PRE step_idx=0 events; got {}",
+        frame_qm_pres.len()
+    );
+    for (i, qm) in frame_qm_pres.iter().enumerate() {
+        assert_eq!(qm.len(), 8, "qm_pre array length");
+        let qm_arr: [i32; 8] = qm
+            .as_slice()
+            .try_into()
+            .expect("qm_pre carries exactly 8 i32 fields");
+        assert_eq!(
+            qm_arr, expected_qm,
+            "frame {i} must enter Stage-A with the digest-primed qm[] \
+             (spec/07 §3.6 reapplies the priming at EVERY frame init); \
+             got qm={qm:?}, expected={expected_qm:?}"
+        );
+    }
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[cfg(feature = "trace")]
+#[test]
+fn trace_tape_format2_qm_priming_reapplied_every_frame_stereo() {
+    // Stereo multi-frame variant: spec/07 §3.5 says all `nch` channels
+    // share the SAME `dec_data` priming. Spec/06 §7.3 says
+    // `step_idx = 0..nch*expected_samples-1` and `channel = step_idx
+    // mod nch`, so channel 0's first sample lives at `step_idx=0` and
+    // channel 1's at `step_idx=1`. We scan the first nch=2 LMS_PRE
+    // events of every frame and assert both carry the digest-derived
+    // qm_pre.
+    let tmp = std::env::temp_dir().join("oxideav-tta-trace-fmt2-multi-stereo.tsv");
+    if tmp.exists() {
+        std::fs::remove_file(&tmp).unwrap();
+    }
+    crate::trace::set_thread_trace_path(Some(tmp.clone()));
+
+    let n_per_ch = 110_250;
+    let mut samples = Vec::with_capacity(n_per_ch * 2);
+    for s in 0..n_per_ch {
+        let phase_l = 2.0 * std::f64::consts::PI * 440.0 * s as f64 / 44_100.0;
+        let phase_r = 2.0 * std::f64::consts::PI * 660.0 * s as f64 / 44_100.0;
+        samples.push((phase_l.sin() * 11_000.0).round() as i32);
+        samples.push((phase_r.sin() * 8_000.0).round() as i32);
+    }
+    let password = b"stereo trace fmt2";
+    let tta = encode_with_password(&samples, 2, 16, 44_100, password).expect("encode");
+    let (_info, _decoded) = decode_with_password(&tta, password).expect("decode");
+    crate::trace::set_thread_trace_path(None);
+
+    let expected_qm = crate::password::derive_qm_priming(password);
+
+    let tape = std::fs::read_to_string(&tmp).expect("tape was written");
+    // Group qm_pre observations at step_idx ∈ {0, 1} (= first sample
+    // slot of nch=2) by (frame_idx, channel).
+    let mut by_frame_ch: std::collections::BTreeMap<(u32, u32), [i32; 8]> =
+        std::collections::BTreeMap::new();
+    for line in tape.lines() {
+        if !line.starts_with("ev=LMS_PRE\t") {
+            continue;
+        }
+        let mut frame_idx: Option<u32> = None;
+        let mut step_idx: Option<u32> = None;
+        let mut channel: Option<u32> = None;
+        let mut qm_pre: Option<Vec<i32>> = None;
+        for rec in line.split('\t').skip(1) {
+            let (k, v) = rec.split_once('=').expect("malformed key=value");
+            match k {
+                "frame_idx" => frame_idx = Some(v.parse().unwrap()),
+                "step_idx" => step_idx = Some(v.parse().unwrap()),
+                "channel" => channel = Some(v.parse().unwrap()),
+                "qm_pre" => {
+                    qm_pre = Some(v.split(',').map(|s| s.parse::<i32>().unwrap()).collect())
+                }
+                _ => {}
+            }
+        }
+        // First sample of each frame: step_idx=0 (channel 0) and
+        // step_idx=1 (channel 1) per spec/06 §7.3.
+        let s = step_idx.unwrap();
+        if s == 0 || s == 1 {
+            let arr: [i32; 8] = qm_pre.unwrap().as_slice().try_into().unwrap();
+            by_frame_ch.insert((frame_idx.unwrap(), channel.unwrap()), arr);
+        }
+    }
+    // Expect ≥ 3 frames × 2 channels = 6 entries.
+    assert!(
+        by_frame_ch.len() >= 6,
+        "expected ≥ 6 (frame,channel) entries for ≥ 3 frames × 2 channels; got {}",
+        by_frame_ch.len()
+    );
+    for ((frame_idx, channel), qm) in &by_frame_ch {
+        assert_eq!(
+            *qm, expected_qm,
+            "frame {frame_idx} channel {channel}: qm[] must be the digest priming \
+             (spec/07 §3.5 — same digest for ALL nch channels, spec/07 §3.6 — \
+             every frame init re-primes); got qm={qm:?}, expected={expected_qm:?}"
+        );
+    }
+    let _ = std::fs::remove_file(&tmp);
+}

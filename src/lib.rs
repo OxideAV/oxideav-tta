@@ -1,13 +1,19 @@
 //! Pure-Rust True Audio (TTA) lossless audio codec.
 //!
-//! **Round 3 — clean-room implementation, encoder + decoder.** This
+//! **Round 5 — clean-room implementation, encoder + decoder.** This
 //! crate decodes and encodes TTA1 format=1 (integer PCM) and format=2
 //! (password-derived qm priming; `spec/07`) streams in pure safe Rust
 //! against the strict-isolation clean-room workspace at
 //! `docs/audio/tta-cleanroom/`. Round 2 added the spec/06 trace
 //! contract (debug build) and the `oxideav-core` framework
 //! integration; round 3 promoted the test-only encoder to a public
-//! API that round-trips bit-exactly through the decoder.
+//! API that round-trips bit-exactly through the decoder; round 4
+//! added ID3v1 / APEv2 trailer detection (`spec/01` §7); round 5
+//! closed `audit/07` §6.2-2 / §6.2-3 / §6.2-5 — `HEADER_CRC` now
+//! carries the real computed CRC, `decode_with_password` no longer
+//! double-parses format=1 streams, and multi-frame format=2 trace
+//! tests put a wire-level seal on `spec/07` §3.6's
+//! "re-prime qm[] at every frame init" rule.
 //!
 //! The decoder pipeline mirrors `spec/02..05`:
 //!
@@ -121,23 +127,17 @@ pub fn decode(bytes: &[u8]) -> Result<(StreamInfo, Vec<i32>)> {
 /// per `spec/02` §3.1).
 pub fn decode_with_password(bytes: &[u8], password: &[u8]) -> Result<(StreamInfo, Vec<i32>)> {
     let priming = crate::password::derive_qm_priming(password);
-    let dec = Decoder::new_with_priming(bytes, Some(priming))?;
-    let header = dec.header;
+    let mut dec = Decoder::new_with_priming(bytes, Some(priming))?;
     // Format=1 with password supplied: the digest is computed but
-    // shouldn't actually mutate state — fall through to the
-    // priming-aware decoder, which only applies the priming when
-    // the header carries format == 2 (Decoder::new_with_priming
-    // stores it but decode_frame_inner accepts it unconditionally;
-    // for format=1 the existing format=1 corpus expects zero qm
-    // init, so we re-zero in that branch).
-    let pcm = if header.format == 1 {
-        // Re-construct without the priming so format=1's invariant
-        // (qm zero-init at every frame) is preserved.
-        let dec_clean = Decoder::new(bytes)?;
-        dec_clean.decode_all()?
-    } else {
-        dec.decode_all()?
-    };
+    // must not mutate state. Clear the priming on the existing
+    // decoder so format=1's invariant (qm zero-init at every frame
+    // per spec/02 §3.1) is preserved without re-parsing the header
+    // and seek table (closes audit/07 §6.2-2).
+    if dec.header.format == 1 {
+        dec.clear_priming();
+    }
+    let header = dec.header;
+    let pcm = dec.decode_all()?;
     Ok((header, pcm))
 }
 

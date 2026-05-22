@@ -8,6 +8,39 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-5: multi-frame format=2 (password-derived qm priming) round-trip
+  + trace-tape coverage closing `docs/audio/tta-cleanroom/audit/07`
+  §6.2-5. New tests in `roundtrip_tests` exercise format=2 across 3+
+  frames in both mono (2.5 s @ 44.1 kHz) and stereo configurations and
+  verify (a) sample-exact decoder/encoder round-trip across every
+  frame boundary, and (b) under the `trace` feature, that the
+  `LMS_PRE` event's `qm_pre[]` carries the ECMA-182 CRC-64 digest
+  bytes at step_idx ∈ {0..nch-1} of **every** frame — proving the
+  spec/07 §3.5 / §3.6 "qm priming reapplied at every frame init,
+  shared across all `nch` channels" rule on the wire (single-frame
+  trace coverage couldn't distinguish "prime once at frame 0" from
+  "prime at every frame").
+
+### Changed
+
+- `decoder::Decoder` now stores the freshly-computed IEEE-802.3 CRC32
+  of the 18 stream-header body bytes (`header_crc`) alongside the
+  parsed header. The `trace` feature's `HEADER_CRC` event surfaces
+  the real value instead of the prior placeholder zero, closing
+  `audit/07` §6.2-3. The header parser exposes the value through a
+  new `parse_stream_header_with_crc` entry; the existing
+  `parse_stream_header_any_format` is a thin wrapper that drops it.
+- `decode_with_password` no longer re-parses the header and seek
+  table when the on-disk `format` field is `1` (audit/07 §6.2-2).
+  A new crate-internal `Decoder::clear_priming` method drops the
+  computed digest in place on the already-constructed decoder so
+  format=1's spec/02 §3.1 zero-init invariant is preserved without
+  the redundant second parse.
+
+## [0.0.1] — round 1–4
+
+### Added
+
 - Round-4: ID3v1 / APEv2 trailer detection per `spec/01` §7. New
   public entry points `scan_trailers(bytes) -> Result<TrailerInfo>`
   (parses the optional ID3v2 prefix + stream header + seek table to

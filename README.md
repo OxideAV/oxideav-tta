@@ -5,9 +5,9 @@ Pure-Rust True Audio (TTA) lossless audio codec for the
 
 ## Status
 
-**Round 4 — clean-room encoder + decoder + framework integration +
-trace tape + format=2 + ID3v1/APEv2 trailer detection.** Both encodes
-and decodes TTA1 format=1
+**Round 5 — clean-room encoder + decoder + framework integration +
+trace tape + format=2 + ID3v1/APEv2 trailer detection + multi-frame
+format=2 trace coverage.** Both encodes and decodes TTA1 format=1
 (integer PCM) and format=2 (password-derived qm priming, `spec/07`)
 streams in pure safe Rust against the strict-isolation clean-room
 workspace at
@@ -118,6 +118,34 @@ input to this rebuild.
   (the trailer is treated as "not present" rather than as a parse
   error, mirroring libtta's silent passthrough behaviour for
   trailers).
+
+## What round 5 adds on top
+
+- **Multi-frame format=2 trace coverage** closing
+  `docs/audio/tta-cleanroom/audit/07` §6.2-5. The pre-existing
+  format=2 tests covered a single frame only, which couldn't tell
+  the spec-correct "re-prime qm[] at every frame init" behaviour
+  (`spec/07` §3.5 / §3.6) apart from a hypothetical "prime once at
+  frame 0" implementation. The round-5 tests exercise format=2
+  across 3+ frames in both mono and stereo at 44.1 kHz and verify,
+  under the `trace` feature, that the `LMS_PRE` event's `qm_pre[]`
+  carries the ECMA-182 CRC-64 digest bytes at step_idx ∈
+  {0..nch-1} of **every** frame — putting a wire-level seal on
+  spec/07 §3.6.
+- **`HEADER_CRC` `computed_crc` carries the real value**, not the
+  placeholder zero flagged by `audit/07` §6.2-3. The decoder now
+  threads the freshly-computed IEEE-802.3 CRC32 of the 18
+  header-body bytes through to the trace emitter, so a
+  conformance-tape exact-match against a libtta-instrumented
+  reference no longer needs an `--ignore-fields computed_crc`
+  exemption on the `HEADER_CRC` line.
+- **`decode_with_password` no longer re-parses format=1 streams**
+  (audit/07 §6.2-2). The previous code constructed two `Decoder`s
+  back-to-back when a password was supplied against a format=1
+  file; the new path constructs one, calls a crate-internal
+  `clear_priming` to drop the unused digest, and decodes from
+  there. The format=1 `qm` zero-init invariant (`spec/02` §3.1)
+  is preserved; the redundant header / seek-table parse is gone.
 
 Still out of scope (no current asks): format=3 (IEEE float) and
 bit-exact lockstep against libtta-encoded reference fixtures (needs

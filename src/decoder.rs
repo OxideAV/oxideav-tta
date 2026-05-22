@@ -259,6 +259,15 @@ pub struct Decoder<'a> {
     /// format=1 (the default — qm zero-inits per spec/02 §3.1);
     /// `Some(digest)` for format=2 (spec/07 §3.5).
     pub(crate) qm_priming: Option<[i32; 8]>,
+    /// IEEE-802.3 CRC32 over the 18 stream-header body bytes,
+    /// re-computed at parse time per `spec/01` §3.5. Surfaced to the
+    /// `trace` feature's `HEADER_CRC` event per spec/06 §5.1 (and
+    /// audit/07 §6.2-3); kept on the struct so the trace emitter
+    /// doesn't have to re-parse the header. Without the `trace`
+    /// feature the field is unused but still populated, keeping the
+    /// parse path uniform.
+    #[allow(dead_code)]
+    pub(crate) header_crc: u32,
 }
 
 impl<'a> Decoder<'a> {
@@ -275,7 +284,7 @@ impl<'a> Decoder<'a> {
     pub(crate) fn new_with_priming(bytes: &'a [u8], qm_priming: Option<[i32; 8]>) -> Result<Self> {
         let id3_skip = crate::header::skip_id3v2_prefix(bytes)?;
         let after_id3 = &bytes[id3_skip..];
-        let (header, hdr_len) = crate::header::parse_stream_header_any_format(after_id3)?;
+        let (header, hdr_len, header_crc) = crate::header::parse_stream_header_with_crc(after_id3)?;
         // Format gating fires BEFORE seek-table parse so that a
         // format-validation test on a header-only fixture surfaces
         // the format error (PasswordRequired or UnsupportedFormat)
@@ -299,7 +308,18 @@ impl<'a> Decoder<'a> {
             seek_table_crc_ok: seek_table.crc_ok,
             bytes,
             qm_priming,
+            header_crc,
         })
+    }
+
+    /// Drop the Stage-A `qm` priming vector — the underlying decode
+    /// state will use the format=1 zero-init at every per-channel
+    /// frame entry. Used by [`crate::decode_with_password`] when a
+    /// password was supplied but the on-disk `format` field is `1`
+    /// (the digest is computed but unused; cf. spec/02 §3.1 and
+    /// audit/07 §6.2-2).
+    pub(crate) fn clear_priming(&mut self) {
+        self.qm_priming = None;
     }
 
     /// Decode every frame and return interleaved `i32` PCM samples
@@ -350,11 +370,12 @@ impl<'a> Decoder<'a> {
             self.header.sample_rate,
             self.header.total_samples,
         );
-        // We don't recompute the header CRC at this point — by the
-        // time the Decoder is constructed, the header parser has
-        // already verified it (or returned an error). Emit an "ok"
-        // marker with a zero placeholder for `computed_crc`.
-        t.ev_header_crc(true, 0);
+        // The header CRC was both computed and verified at parse
+        // time; surface the real value here per spec/06 §5.1 and
+        // audit/07 §6.2-3. The `crc_ok` flag is unconditionally true
+        // because a CRC mismatch would have aborted `Decoder::new`
+        // before this point.
+        t.ev_header_crc(true, self.header_crc);
 
         let frame_count = self.frames.len() as u32;
         t.ev_seek_table_begin(frame_count);
