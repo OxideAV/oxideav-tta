@@ -51,6 +51,22 @@ fn shl_saturating(shift: u32) -> u32 {
     }
 }
 
+/// Upper bound on the adaptive Rice parameter `k` (spec §5.3).
+///
+/// The spec notes the increment branch has **no** semantic cap — `k`
+/// can in principle grow without bound — but in the reference encoder
+/// it stays in `[0, 31]` as a numerical artifact of the `bit_shift`
+/// table clamping past index 31. A valid stream never drives `k`
+/// above ~16, but a hostile/corrupt bitstream can chain enough
+/// high-mode escapes to push `k1` (or `k0`) past 31. Without a cap,
+/// the subsequent `read_bits(k)` would request more than 32 bits —
+/// which trips `BitReader::read_bits`'s `k <= 32` invariant (a
+/// debug-build panic; a garbage shift in release). Clamping `k` at 31
+/// on increment mirrors the reference's observed `[0, 31]` range and
+/// keeps every binary-tail read within `read_bits`'s contract without
+/// altering the decode of any valid stream.
+const MAX_K: u32 = 31;
+
 /// Decode one Rice value from `reader` and return the signed residual.
 /// Updates `state` in place per spec §5.
 #[allow(dead_code)] // direct callers vanish under `--features trace`.
@@ -83,7 +99,7 @@ pub fn decode_one_traced(reader: &mut BitReader<'_>, state: &mut RiceState) -> R
         state.sum1 = state.sum1.wrapping_add(value).wrapping_sub(state.sum1 >> 4);
         if state.k1 > 0 && state.sum1 < shl_saturating(state.k1 + 4) {
             state.k1 -= 1;
-        } else if state.sum1 > shl_saturating(state.k1 + 5) {
+        } else if state.k1 < MAX_K && state.sum1 > shl_saturating(state.k1 + 5) {
             state.k1 += 1;
         }
         // Add the depth-1 escape bias using the CURRENT k0 (spec §3.4,
@@ -95,7 +111,7 @@ pub fn decode_one_traced(reader: &mut BitReader<'_>, state: &mut RiceState) -> R
     state.sum0 = state.sum0.wrapping_add(value).wrapping_sub(state.sum0 >> 4);
     if state.k0 > 0 && state.sum0 < shl_saturating(state.k0 + 4) {
         state.k0 -= 1;
-    } else if state.sum0 > shl_saturating(state.k0 + 5) {
+    } else if state.k0 < MAX_K && state.sum0 > shl_saturating(state.k0 + 5) {
         state.k0 += 1;
     }
 
@@ -191,5 +207,55 @@ mod tests {
         assert_eq!(state.k1, 10);
         assert_eq!(state.sum0, 15_360);
         assert_eq!(state.sum1, 16_384);
+    }
+
+    /// Regression: a hostile bitstream that keeps `sum1` above the
+    /// increment threshold must NOT drive `k1` past `MAX_K` (= 31).
+    /// Before the cap, `k1` could climb to 32+, after which the next
+    /// high-mode tail read called `BitReader::read_bits(k1)` with
+    /// `k1 > 32`, tripping the reader's `k <= 32` invariant (a
+    /// debug-build panic, garbage shift in release). Found by the
+    /// `fuzz/fuzz_targets/decode.rs` harness (round 124). Here we seed
+    /// `k1` at the cap and verify the increment branch leaves it
+    /// pinned at 31 rather than overflowing, and that `decode_one`
+    /// returns `Ok` rather than panicking.
+    #[test]
+    fn k1_increment_saturates_at_max_k() {
+        // A single high-mode step: unary prefix `u = 1` (one `1` bit
+        // then a `0` terminator = LSB-first `0b01` in bit positions
+        // 0,1), followed by a 31-bit tail. `sum1` is seeded huge so
+        // the increment branch fires; `k1` is already at the cap.
+        // Byte 0 low bits: bit0=1 (unary), bit1=0 (terminator), the
+        // remaining 6 bits + bytes 1..=4 supply the 31-bit tail
+        // (33 bits total → 5 bytes; pad to 8 for headroom).
+        let body = [0x01u8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+        let mut reader = BitReader::new(&body);
+        let mut state = RiceState {
+            k0: MAX_K,
+            k1: MAX_K,
+            sum0: 0xFFFF_FFFF,
+            sum1: 0xFFFF_FFFF,
+        };
+        // Must not panic, and must not request more than 32 bits.
+        let _ = decode_one(&mut reader, &mut state).expect("decode must not error on full body");
+        assert!(state.k0 <= MAX_K, "k0 exceeded MAX_K: {}", state.k0);
+        assert!(state.k1 <= MAX_K, "k1 exceeded MAX_K: {}", state.k1);
+    }
+
+    /// Spec §5.3 decrement still works at the cap: with `sum` small,
+    /// a step at `k = MAX_K` decrements rather than staying pinned.
+    #[test]
+    fn k_decrements_normally_from_cap() {
+        let body = [0u8; 8];
+        let mut reader = BitReader::new(&body);
+        let mut state = RiceState {
+            k0: MAX_K,
+            k1: MAX_K,
+            sum0: 0,
+            sum1: 0,
+        };
+        // Low-mode step (unary prefix 0): k0 should decrement.
+        let _ = decode_one(&mut reader, &mut state).expect("decode");
+        assert_eq!(state.k0, MAX_K - 1);
     }
 }

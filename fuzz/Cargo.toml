@@ -1,0 +1,46 @@
+[package]
+name = "oxideav-tta-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# TTA's framing decoder is the surface worth fuzzing: a 22-byte TTA1
+# header (with optional ID3v2 prefix), a `4 * frame_count + 4`-byte
+# seek table, then a sequence of per-frame entropy-coded bodies each
+# followed by a 4-byte CRC. Header field validation, seek-table bounds,
+# block-size arithmetic, the LSB-first bit reader, the adaptive-Rice
+# decoder, the Stage-A/B predictors and the inverse channel
+# decorrelation cascade are all driven from attacker-controlled bytes.
+# There is no external library worth pulling in as a cross-decode
+# oracle (and the clean-room wall bars the C reference `libtta` anyway),
+# so this fuzz crate is **decode-only**: feed arbitrary bytes to
+# `oxideav_tta::decode` (format=1) and `decode_with_password` (format=2)
+# and assert the call always returns a `Result` rather than panicking /
+# aborting / OOMing.
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-tta]
+path = ".."
+# The decode entry points live behind the default `registry` feature's
+# sibling code, but the framing/decoder path itself is feature-agnostic.
+# Disable default features so the fuzz crate does not drag in
+# `oxideav-core`; the `decode` / `decode_with_password` functions are
+# always compiled.
+default-features = false
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false

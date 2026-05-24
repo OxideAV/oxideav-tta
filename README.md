@@ -181,3 +181,26 @@ Tests exercise:
 Bit-exact lockstep against libtta-encoded fixtures is deferred to a
 future Auditor round once a sanctioned reference fixture lands in the
 clean-room workspace.
+
+## Fuzzing
+
+`fuzz/fuzz_targets/decode.rs` is a [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)
+decode-only harness: it feeds arbitrary bytes to both
+[`decode`](src/lib.rs) (format=1) and `decode_with_password` (format=2)
+and asserts the call always returns a `Result` rather than panicking,
+overflowing, indexing out of bounds, or OOMing. The harness body is
+clean-room (no `libtta` oracle); the seed corpus under
+`fuzz/corpus/decode/` is five real streams emitted by the crate's own
+encoder (mono/stereo, 16/24-bit, format=1/2, plus a tiny silent frame).
+
+Run locally with `cargo +nightly fuzz run decode`; the
+`.github/workflows/fuzz.yml` shim gives it a daily 30-minute budget via
+the org reusable workflow.
+
+The harness found one bug (round 124): a corrupt high-mode bitstream
+could chain enough Rice escapes to drive the adaptive parameter `k`
+past 31, after which the next binary-tail read requested more than 32
+bits and tripped the bit reader's `k <= 32` invariant. The Rice
+decoder now caps `k` at 31 on increment — matching the `[0, 31]` range
+the reference encoder stays within per `spec/05` §5.3 — so the cap
+never alters the decode of any valid stream.

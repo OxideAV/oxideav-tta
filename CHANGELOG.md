@@ -8,6 +8,28 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-124: cargo-fuzz harness. `fuzz/fuzz_targets/decode.rs` is a
+  decode-only libfuzzer target driving both `decode` (format=1) and
+  `decode_with_password` (format=2) over arbitrary bytes; the contract
+  is that the call always returns a `Result` rather than panicking,
+  overflowing, indexing out of bounds, or OOMing. Seed corpus under
+  `fuzz/corpus/decode/` is five real streams from the crate's own
+  encoder. `.github/workflows/fuzz.yml` gives it a daily 30-minute
+  budget via the org reusable `crate-fuzz.yml`. The harness body is
+  clean-room (no `libtta` oracle). Two regression unit tests in `rice`
+  pin the cap behaviour found by the fuzzer.
+
+### Fixed
+
+- Round-124: Rice decoder could drive the adaptive parameter `k` past
+  31 on a corrupt high-mode bitstream that chained enough escapes,
+  after which the next binary-tail read requested more than 32 bits and
+  tripped `BitReader::read_bits`'s `k <= 32` invariant (a debug-build
+  panic; a garbage shift in release). `k0`/`k1` are now capped at 31 on
+  increment — matching the `[0, 31]` range the reference encoder stays
+  within per `spec/05` §5.3 — so the cap never alters the decode of any
+  valid stream. Found by the new `fuzz/fuzz_targets/decode.rs` harness.
+
 - Round-5: multi-frame format=2 (password-derived qm priming) round-trip
   + trace-tape coverage closing `docs/audio/tta-cleanroom/audit/07`
   §6.2-5. New tests in `roundtrip_tests` exercise format=2 across 3+
