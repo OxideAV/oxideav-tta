@@ -204,3 +204,17 @@ bits and tripped the bit reader's `k <= 32` invariant. The Rice
 decoder now caps `k` at 31 on increment — matching the `[0, 31]` range
 the reference encoder stays within per `spec/05` §5.3 — so the cap
 never alters the decode of any valid stream.
+
+## Benchmarks
+
+`benches/{decode,encode,roundtrip}.rs` are
+[Criterion](https://github.com/bheisler/criterion.rs) harnesses added
+in round 127 for the "saturated codec gets fuzz + bench + profile"
+follow-through to r124's fuzzer. Each binary covers five scenarios —
+mono / stereo / six-channel, 16-bit and 24-bit, plus a format=2
+(password-derived qm priming) variant — driven by a deterministic
+xorshift-synthesised PCM workload. No checked-in fixture files: every
+input is built in-bench, then the production [`encode`](src/lib.rs)
+turns it into a TTA1 byte stream for the decoder benches to consume.
+
+Run locally with `cargo bench -p oxideav-tta --bench <decode|encode|roundtrip>`.

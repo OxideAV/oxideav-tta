@@ -8,6 +8,18 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-127: Criterion benchmark harnesses under `benches/`. Three
+  self-contained binaries — `decode`, `encode`, and `roundtrip` —
+  drive the production decoder + encoder over a deterministic
+  xorshift-synthesised PCM workload (mono / stereo / 6-channel,
+  16-bit and 24-bit, plus a format=2 password-derived qm-priming
+  variant). No checked-in fixtures: each scenario builds its input
+  in-bench so future optimisation rounds (SIMD Rice emit, faster
+  qm-priming, etc.) have a stable A/B baseline. Run with
+  `cargo bench -p oxideav-tta --bench <name>`. Pairs with the
+  r124 fuzz harness as the "saturated → fuzz/bench/profile"
+  follow-through.
+
 - Round-124: cargo-fuzz harness. `fuzz/fuzz_targets/decode.rs` is a
   decode-only libfuzzer target driving both `decode` (format=1) and
   `decode_with_password` (format=2) over arbitrary bytes; the contract

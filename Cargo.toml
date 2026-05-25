@@ -26,3 +26,29 @@ trace = []
 
 [dependencies]
 oxideav-core = { version = "0.1", optional = true }
+
+[dev-dependencies]
+# Round 127 (depth-mode benchmarks): Criterion drives the three bench
+# harnesses (`decode`, `encode`, `roundtrip`) that future encoder /
+# decoder rounds use to A/B their algorithm tweaks. Pinned to the
+# same 0.5 line the other OxideAV crates with benches (cinepak,
+# magicyuv, h264, pixfmt) already track.
+criterion = "0.5"
+
+# Round 127 benches. Each binary lives in `benches/<name>.rs` and is
+# self-contained (no committed fixture files — every PCM input is
+# synthesised in-bench from a deterministic xorshift seed, then fed
+# through the crate's own production `encode` to build the TTA1 byte
+# stream the decoder benches consume). Run with:
+#     cargo bench -p oxideav-tta --bench <name>
+[[bench]]
+name = "decode"
+harness = false
+
+[[bench]]
+name = "encode"
+harness = false
+
+[[bench]]
+name = "roundtrip"
+harness = false
