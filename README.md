@@ -205,6 +205,34 @@ decoder now caps `k` at 31 on increment — matching the `[0, 31]` range
 the reference encoder stays within per `spec/05` §5.3 — so the cap
 never alters the decode of any valid stream.
 
+## Property tests
+
+`tests/malformed_props.rs` is a round-156 addition that complements
+the r124 fuzzer with a *semantic* fault-injection layer: structurally-
+valid TTA1 streams with a single, deliberately-chosen corruption,
+verifying that the documented `Error` variants surface (and never a
+panic). The nine tests are driven by a deterministic xorshift64* PRNG
+(same convention as `oxideav-scene/tests/transform_props.rs`), so any
+failure reproduces from the literal seed in the source. Coverage:
+
+- exhaustive `22 × 8` single-bit-flip walk of the stream header;
+- exhaustive byte-prefix truncation walk (format=1 and format=2);
+- **seek-table re-CRC bait** — flip one seek-table entry, then
+  recompute the seek-table CRC32 so the decoder cannot rely on the
+  seek-table CRC as the rejection signal; the disagreement must
+  surface at the per-frame CRC32 instead;
+- oversize `total_samples` with recomputed header CRC;
+- wrong-password format=2 (decode must not panic; if it returns
+  `Ok` the PCM shape must match the header);
+- randomised ID3v2 prefix sweep — every variant must decode to the
+  same PCM as the un-prefixed stream;
+- randomised trailer-region junk — `scan_trailers` must never claim
+  a trailer that overlaps the in-stream frame region;
+- pseudo-noise round-trip at randomised `(channels, bits_per_sample)`
+  shapes (1..=6 channels, 16- or 24-bit).
+
+Run locally with `cargo test -p oxideav-tta --test malformed_props`.
+
 ## Benchmarks
 
 `benches/{decode,encode,roundtrip}.rs` are

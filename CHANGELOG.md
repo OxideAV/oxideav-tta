@@ -8,6 +8,32 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-156: malformed-input property tests under `tests/malformed_props.rs`.
+  Nine integration tests, all driven by a deterministic xorshift64*
+  PRNG so failures reproduce from the literal seed in the source
+  (matching `oxideav-scene/tests/transform_props.rs`'s convention).
+  Coverage classes — exhaustive 22×8 bit-flip walk of the stream
+  header, exhaustive prefix-truncation walk (format=1 and format=2),
+  seek-table re-CRC bait (recompute the seek-table CRC after
+  corrupting an entry, forcing the rejection signal onto the
+  per-frame CRC), oversize `total_samples` with recomputed header
+  CRC, wrong-password format=2 (must not panic; if `Ok` the PCM
+  shape must match the header), randomised ID3v2-prefix sweep
+  (every prefix must yield identical PCM to the un-prefixed
+  decode), randomised trailer-region junk (`scan_trailers` must
+  never claim a trailer that overlaps the in-stream frame region),
+  and pseudo-noise round-trip at randomised channel-count /
+  bit-depth shapes. Targets the *semantic* fault classes that
+  random-bytes fuzzing typically misses (a corrupt seek-table
+  with a valid CRC is structurally indistinguishable from a real
+  one to a panic-only oracle). All nine pass against the r124
+  Rice-cap fix, the r127 baseline encoder, and the r5 audit/07
+  closures. Tests use only the public crate API (`decode`,
+  `decode_with_password`, `encode`, `encode_with_password`,
+  `scan_trailers`); a local IEEE-802.3 CRC32 helper duplicates
+  `spec/01` §6 instead of reaching into the crate's private
+  `crc32` module.
+
 - Round-127: Criterion benchmark harnesses under `benches/`. Three
   self-contained binaries — `decode`, `encode`, and `roundtrip` —
   drive the production decoder + encoder over a deterministic
