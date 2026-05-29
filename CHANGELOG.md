@@ -8,6 +8,31 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-175: two additional cargo-fuzz targets under
+  `fuzz/fuzz_targets/`:
+  - `scan_trailers` — drives the public `scan_trailers` entry point
+    with arbitrary bytes. Exercises the ID3v2 prefix skip, TTA1
+    header parse, seek-table sum arithmetic, and the
+    `detect_trailers` ID3v1 / APEv2 footer scanner (`spec/01` §7).
+    Contract: every call returns a `Result`, never panicking,
+    integer-overflowing, indexing out of bounds, or allocating
+    proportional to an attacker-controlled header field. 500K
+    iterations clean (cov 132, ft 133).
+  - `encode_roundtrip` — drives the public `encode` /
+    `encode_with_password` over a typed `(channels × bps ×
+    sample_rate × format × samples)` parameter cube and asserts (i)
+    the encoder either rejects with a typed
+    `Error::Unsupported…` / `InvalidSampleBuffer`, or returns
+    `Ok(bytes)`; (ii) every `Ok(bytes)` decodes back via the matching
+    `decode` / `decode_with_password` call; (iii) the recovered
+    `i32` samples equal the input bit-exactly. 500K iterations clean
+    (cov 688, ft 3221, ~18.5K exec/s).
+  Both targets seeded under `fuzz/corpus/{scan_trailers,encode_roundtrip}/`.
+  The reusable `OxideAV/.github` fuzz workflow auto-discovers
+  cargo-fuzz `[[bin]]` blocks from `fuzz/Cargo.toml`, so the 30-min
+  daily budget is now split three-way across `decode`,
+  `scan_trailers`, and `encode_roundtrip`.
+
 - Round-156: malformed-input property tests under `tests/malformed_props.rs`.
   Nine integration tests, all driven by a deterministic xorshift64*
   PRNG so failures reproduce from the literal seed in the source

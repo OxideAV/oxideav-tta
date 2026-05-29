@@ -16,10 +16,21 @@ cargo-fuzz = true
 # decorrelation cascade are all driven from attacker-controlled bytes.
 # There is no external library worth pulling in as a cross-decode
 # oracle (and the clean-room wall bars the C reference `libtta` anyway),
-# so this fuzz crate is **decode-only**: feed arbitrary bytes to
-# `oxideav_tta::decode` (format=1) and `decode_with_password` (format=2)
-# and assert the call always returns a `Result` rather than panicking /
-# aborting / OOMing.
+# so this fuzz crate covers three internal-only contracts:
+#
+# - **`decode`**: panic-free decode of arbitrary bytes through
+#   `decode` (format=1) and `decode_with_password` (format=2).
+# - **`scan_trailers`**: panic-free walk of the trailer-detection
+#   path (`spec/01` §7) — exercises the ID3v2 prefix skip, seek-table
+#   sum arithmetic, and ID3v1 / APEv2 footer scanner against arbitrary
+#   header / trailer-region byte combinations.
+# - **`encode_roundtrip`**: panic-free encode AND bit-exact roundtrip
+#   through `decode`. Drives `encode` / `encode_with_password` across
+#   the `(channels × bps × sample_rate × format × samples)` parameter
+#   cube and asserts the encoder either rejects with a typed
+#   `Error::Unsupported…` / `InvalidSampleBuffer`, or produces bytes
+#   the in-crate decoder accepts and reconstructs to the original
+#   `i32` samples bit-exactly.
 [dependencies]
 libfuzzer-sys = "0.4"
 
@@ -42,5 +53,17 @@ debug = 1
 [[bin]]
 name = "decode"
 path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "scan_trailers"
+path = "fuzz_targets/scan_trailers.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "encode_roundtrip"
+path = "fuzz_targets/encode_roundtrip.rs"
 test = false
 doc = false
