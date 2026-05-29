@@ -354,6 +354,121 @@ impl<'a> Decoder<'a> {
         Ok(out)
     }
 
+    /// Decode a single frame **by its index** in the seek table and
+    /// return its interleaved `i32` PCM samples (length
+    /// `frame.sample_count * header.channels`).
+    ///
+    /// Per `spec/01` §5.1 + `spec/02..05` §3.1, every codec stage
+    /// (Rice trackers, Stage-A LMS state, Stage-B `prev` register)
+    /// **resets at every frame boundary** — frames are therefore
+    /// independently decodable from `(header, descriptor, frame_bytes,
+    /// qm_priming)`. No carryover state. That property is what makes
+    /// random-access decode (this method) and the streaming
+    /// [`Decoder::frame_iter`] both legitimate against the spec.
+    ///
+    /// Returns [`Error::Truncated`] if the seek-table entry points
+    /// outside the in-memory slice, [`Error::Crc32Mismatch`] on a
+    /// per-frame CRC failure, or any of the bitstream-level errors
+    /// raised by the underlying entropy / predictor decoders.
+    pub fn decode_frame_at(&self, index: usize) -> Result<Vec<i32>> {
+        let frame = self.frames.get(index).ok_or(Error::FrameIndexOutOfRange)?;
+        let off = frame.file_offset as usize;
+        let end = off
+            .checked_add(frame.disk_size as usize)
+            .ok_or(Error::Truncated)?;
+        if end > self.bytes.len() {
+            return Err(Error::Truncated);
+        }
+        let frame_bytes = &self.bytes[off..end];
+        decode_frame_inner(
+            &self.header,
+            frame,
+            frame_bytes,
+            self.qm_priming.as_ref(),
+            index as u32,
+            #[cfg(feature = "trace")]
+            None,
+        )
+    }
+
+    /// Lazy iterator over the stream's frames. Each `next()` decodes
+    /// the next frame in order and yields its interleaved PCM
+    /// samples — memory usage is bounded by `O(samples_per_frame *
+    /// channels)` regardless of total stream length.
+    ///
+    /// Intended for streaming consumers (e.g. an `oxideav-pipeline`
+    /// stage) that want to start producing samples before the whole
+    /// file is decoded. The eager `decode_all` path materialises the
+    /// full sample buffer; this one does not.
+    ///
+    /// The iterator is **trace-silent** (it does not emit `spec/06`
+    /// trace events). Callers who need a tape should use
+    /// [`Decoder::decode_all`] instead — the trace contract was
+    /// designed around the eager path and adding per-call trace setup
+    /// would defeat the streaming property.
+    pub fn frame_iter(&self) -> FrameIter<'_, 'a> {
+        FrameIter {
+            decoder: self,
+            next_idx: 0,
+        }
+    }
+
+    /// Like [`Decoder::frame_iter`] but starts decoding at frame
+    /// `start_index` instead of frame `0`. Used in combination with
+    /// [`Decoder::seek_to_sample`] to resume decode at a seek point
+    /// without paying for the skipped prefix.
+    ///
+    /// `start_index >= frames.len()` produces an empty iterator
+    /// rather than an error — callers that want to detect that
+    /// should bound-check against `dec.frames.len()` first.
+    pub fn frame_iter_from(&self, start_index: usize) -> FrameIter<'_, 'a> {
+        FrameIter {
+            decoder: self,
+            next_idx: start_index.min(self.frames.len()),
+        }
+    }
+
+    /// Per-channel total sample count for the stream.
+    pub fn total_samples(&self) -> u32 {
+        self.header.total_samples
+    }
+
+    /// Locate the frame containing the per-channel `sample_index`
+    /// (zero-based) and the sample's offset within that frame.
+    ///
+    /// All frames except the last contain exactly
+    /// `header.regular_frame_samples()` per-channel samples per spec
+    /// §4.1; this method walks that arithmetic so callers don't have
+    /// to. Returns [`Error::SampleIndexOutOfRange`] if `sample_index
+    /// >= header.total_samples`.
+    ///
+    /// To resume decode from a seek point, decode the returned
+    /// `frame_index` (and any subsequent frames) via
+    /// [`Decoder::decode_frame_at`] / [`Decoder::frame_iter`] then
+    /// skip `sample_offset_in_frame * header.channels` interleaved
+    /// PCM entries.
+    pub fn seek_to_sample(&self, sample_index: u64) -> Result<SeekPoint> {
+        if sample_index >= self.header.total_samples as u64 {
+            return Err(Error::SampleIndexOutOfRange);
+        }
+        let regular = self.header.regular_frame_samples() as u64;
+        if regular == 0 {
+            return Err(Error::SampleIndexOutOfRange);
+        }
+        let frame_index = (sample_index / regular) as usize;
+        let sample_offset_in_frame = (sample_index % regular) as u32;
+        // Defensive: the per-frame math should never index past
+        // self.frames given the §4.1 derivation, but a hand-crafted
+        // header could disagree with its own total_samples.
+        if frame_index >= self.frames.len() {
+            return Err(Error::SampleIndexOutOfRange);
+        }
+        Ok(SeekPoint {
+            frame_index,
+            sample_offset_in_frame,
+        })
+    }
+
     /// Emit the §5.1 container-level events plus the §5.2 per-channel
     /// init events to the trace tape, in the order required by §7.1
     /// and §7.2.
@@ -401,3 +516,67 @@ impl<'a> Decoder<'a> {
         }
     }
 }
+
+/// A located position in the stream produced by
+/// [`Decoder::seek_to_sample`].
+///
+/// Combined with the seek table, this is enough information to start
+/// decode at any per-channel sample boundary in the stream without
+/// touching prior frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeekPoint {
+    /// Zero-based index into [`Decoder::frames`] of the frame
+    /// containing the requested sample.
+    pub frame_index: usize,
+    /// Zero-based per-channel sample offset within that frame at
+    /// which the requested sample sits. To consume only samples at
+    /// or after the seek point, skip
+    /// `sample_offset_in_frame * header.channels` interleaved
+    /// entries from the start of the frame's decoded PCM buffer.
+    pub sample_offset_in_frame: u32,
+}
+
+/// Lazy frame-by-frame decoder iterator returned by
+/// [`Decoder::frame_iter`].
+///
+/// Each call to `next()` decodes exactly one frame and yields its
+/// interleaved `i32` PCM samples. Memory used by the iterator itself
+/// is `O(1)` (a back-reference to the parent [`Decoder`] plus a
+/// `usize` cursor); the per-frame PCM buffer is freshly allocated by
+/// the underlying decode step.
+///
+/// Stops yielding when every frame in the seek table has been
+/// consumed. A bitstream-level decode error short-circuits the
+/// iterator: the error variant is returned once and any subsequent
+/// `next()` call returns `None`.
+pub struct FrameIter<'d, 'a> {
+    decoder: &'d Decoder<'a>,
+    next_idx: usize,
+}
+
+impl<'d, 'a> Iterator for FrameIter<'d, 'a> {
+    type Item = Result<Vec<i32>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next_idx >= self.decoder.frames.len() {
+            return None;
+        }
+        let idx = self.next_idx;
+        self.next_idx += 1;
+        let res = self.decoder.decode_frame_at(idx);
+        if res.is_err() {
+            // Short-circuit further iteration; the caller already
+            // owns the error and re-polling would just truncate
+            // again or produce stale state on a recoverable case.
+            self.next_idx = self.decoder.frames.len();
+        }
+        Some(res)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.decoder.frames.len().saturating_sub(self.next_idx);
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'d, 'a> ExactSizeIterator for FrameIter<'d, 'a> {}

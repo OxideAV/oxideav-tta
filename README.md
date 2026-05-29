@@ -14,6 +14,18 @@ workspace at
 [`docs/audio/tta-cleanroom/`](https://github.com/OxideAV/docs/tree/master/audio/tta-cleanroom).
 Encoder output round-trips bit-exactly through the decoder.
 
+Round 187 layers a streaming + random-access decode API on top of
+the existing eager path: `Decoder::frame_iter` (lazy, `O(frame)`
+memory), `Decoder::decode_frame_at(index)` (random-access by
+seek-table index), `Decoder::seek_to_sample(sample_index)` (locate
+the frame containing a per-channel sample), and
+`Decoder::frame_iter_from(start_index)` (resume from the seek
+point without decoding the skipped prefix). The bit-exact
+agreement with `decode_all` is locked by tests for both
+single-frame and full streaming-from-seek paths — the per-frame
+state-reset discipline of `spec/01` §5.1 + `spec/02..05` §3.1 is
+what makes random-access decode legitimate against the spec.
+
 The fresh orphan `master` is the starting point; the previous
 implementation, retired alongside the OxideAV docs audit dated
 2026-05-06 (see

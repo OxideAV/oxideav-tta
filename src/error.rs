@@ -36,6 +36,14 @@ pub enum Error {
     /// multiple of the requested channel count. Length must equal
     /// `total_samples * channels`.
     InvalidSampleBuffer,
+    /// A frame index passed to
+    /// [`crate::Decoder::decode_frame_at`] was outside
+    /// `0..frames.len()`.
+    FrameIndexOutOfRange,
+    /// A per-channel sample index passed to
+    /// [`crate::Decoder::seek_to_sample`] was at or above the
+    /// stream's `total_samples`.
+    SampleIndexOutOfRange,
 }
 
 impl core::fmt::Display for Error {
@@ -67,6 +75,10 @@ impl core::fmt::Display for Error {
             Error::InvalidSampleBuffer => f.write_str(
                 "oxideav-tta: interleaved PCM length is not a multiple of channel count",
             ),
+            Error::FrameIndexOutOfRange => f.write_str("oxideav-tta: frame index out of range"),
+            Error::SampleIndexOutOfRange => {
+                f.write_str("oxideav-tta: sample index at or above total_samples")
+            }
         }
     }
 }

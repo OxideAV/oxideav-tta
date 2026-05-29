@@ -61,7 +61,12 @@
 //!   into the appropriate `i16` / 24-bit / `i32` little-endian byte
 //!   stream per `spec/01` §3.2.
 //! - [`Decoder`] — lower-level frame-by-frame interface for streaming
-//!   consumers.
+//!   consumers. Offers [`Decoder::decode_all`] (eager, full-stream),
+//!   [`Decoder::frame_iter`] (lazy, one frame at a time — `O(frame)`
+//!   memory regardless of stream length), [`Decoder::decode_frame_at`]
+//!   (random-access by frame index), and the
+//!   [`Decoder::seek_to_sample`] / [`Decoder::frame_iter_from`]
+//!   pair for resume-from-sample seeking via the seek table.
 //! - [`Error`] — crate-local error type.
 //!
 //! All identifiers are documented; see each module for the spec
@@ -87,7 +92,7 @@ mod tables;
 mod trace;
 mod trailers;
 
-pub use crate::decoder::{decode_frame, Decoder};
+pub use crate::decoder::{decode_frame, Decoder, FrameIter, SeekPoint};
 pub use crate::encoder::{encode, encode_with_password};
 pub use crate::error::{Error, Result};
 pub use crate::header::{FrameDescriptor, StreamHeader};

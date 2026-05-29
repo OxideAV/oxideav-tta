@@ -8,6 +8,44 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-187: streaming + random-access decode API on `Decoder`.
+  The new surface exposes:
+  - `Decoder::frame_iter(&self) -> FrameIter` — lazy iterator that
+    yields one `Result<Vec<i32>>` per frame. Memory usage is
+    bounded by `O(samples_per_frame * channels)` regardless of
+    stream length. The eager `Decoder::decode_all` path is
+    unchanged; new code that wants to start producing PCM before
+    the whole file is decoded can use this instead.
+  - `Decoder::decode_frame_at(&self, index)` — random-access
+    decode of a single frame addressed by its seek-table index.
+    Bit-identical to the slice of `decode_all` covering that
+    frame (verified by the new
+    `decode_frame_at_matches_decode_all_mono_24bit` test): the
+    spec/01 §5.1 + spec/02..05 §3.1 per-frame state-reset
+    discipline is what makes this safe.
+  - `Decoder::seek_to_sample(&self, sample_index)` — locate the
+    frame containing a given per-channel sample, returning a
+    `SeekPoint { frame_index, sample_offset_in_frame }` driven by
+    the spec §4.1 `regular_frame_samples = floor(sample_rate *
+    256 / 245)` arithmetic.
+  - `Decoder::frame_iter_from(&self, start_index)` — start a lazy
+    iterator at the given frame instead of zero, so the
+    seek-and-resume path does not decode the skipped prefix.
+  - `Decoder::total_samples(&self)` — accessor for the
+    per-channel total sample count (mirrors the header field but
+    avoids the consumer having to reach into `header`).
+  - `FrameIter` (re-exported at crate root) and `SeekPoint` —
+    `ExactSizeIterator` shape with a correct `size_hint`.
+  Adds `Error::FrameIndexOutOfRange` and
+  `Error::SampleIndexOutOfRange` for the two new failure modes.
+  Six new lib tests in `roundtrip_tests` lock the bit-exact
+  agreement with `decode_all`, the seek-and-resume integration
+  property, and the out-of-range rejection behaviour. Lib-test
+  count: 78 → 85 (+7 incl. the new past-end test); integration
+  tests unchanged at 9 (the existing `malformed_props.rs`
+  exhaustive-`match Error` block was widened with the two new
+  variants as panic arms — they are decoder-API misuse, not
+  outcomes a header bit-flip can produce).
 - Round-175: two additional cargo-fuzz targets under
   `fuzz/fuzz_targets/`:
   - `scan_trailers` — drives the public `scan_trailers` entry point

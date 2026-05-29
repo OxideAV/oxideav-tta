@@ -790,3 +790,202 @@ fn trace_tape_format2_qm_priming_reapplied_every_frame_stereo() {
     }
     let _ = std::fs::remove_file(&tmp);
 }
+
+// ---------------------------------------------------------------
+// Streaming + random-access decode API (spec/01 §"seek table" +
+// spec/02..05 §3.1 per-frame state reset). The properties under
+// test:
+//
+//   1. `decode_frame_at(i)` returns bit-identical PCM to the
+//      corresponding slice of `decode_all()`. This is the
+//      "per-frame state-reset" property in observable form: if
+//      any stage carried state across frames, random-access would
+//      diverge.
+//   2. `frame_iter()` produces the same concatenation as
+//      `decode_all()`.
+//   3. `seek_to_sample(s)` lands on a `frame_index` whose
+//      `(file_offset_in_per_channel_samples, +sample_count)`
+//      window contains `s`, and `sample_offset_in_frame` matches
+//      `s` exactly.
+//   4. `frame_iter()` reports a correct `size_hint` and an
+//      ExactSizeIterator length matching `Decoder::frames.len()`.
+// ---------------------------------------------------------------
+
+#[test]
+fn frame_iter_matches_decode_all_stereo_16bit() {
+    let n = (44_100.0 * 0.4) as usize; // big enough to span multiple frames
+    let samples = pseudo_noise(n, 2, 0x7FFF, 0xDEAD_BEEF);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+
+    let eager = decode(&tta).expect("eager decode").1;
+
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let mut streaming = Vec::with_capacity(eager.len());
+    for r in dec.frame_iter() {
+        streaming.extend_from_slice(&r.expect("frame_iter decode"));
+    }
+    assert_eq!(
+        streaming, eager,
+        "streaming frame_iter must produce bit-identical PCM to decode_all"
+    );
+}
+
+#[test]
+fn decode_frame_at_matches_decode_all_mono_24bit() {
+    let n = (44_100.0 * 0.4) as usize;
+    let samples = pseudo_noise(n, 1, 0x7F_FFFF, 0xC0FF_EE12);
+    let tta = encode(&samples, 1, 24, 44_100).expect("encode");
+
+    let eager = decode(&tta).expect("eager decode").1;
+
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let mut cursor = 0usize;
+    for (i, fd) in dec.frames.iter().enumerate() {
+        let n_per_ch = fd.sample_count as usize;
+        let frame_pcm = dec.decode_frame_at(i).expect("decode_frame_at");
+        let expected = &eager[cursor..cursor + n_per_ch * dec.header.channels as usize];
+        assert_eq!(
+            frame_pcm, expected,
+            "decode_frame_at({i}) must equal the slice of decode_all at sample cursor {cursor}; \
+             if it does not, the per-frame state reset (spec/02..05 §3.1) is being violated"
+        );
+        cursor += n_per_ch * dec.header.channels as usize;
+    }
+    assert_eq!(cursor, eager.len(), "frame loop must cover every sample");
+}
+
+#[test]
+fn decode_frame_at_rejects_out_of_range_index() {
+    let samples = sine(64, 1, 44_100, 440.0, 12_000);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let last = dec.frames.len();
+    assert_eq!(
+        dec.decode_frame_at(last),
+        Err(crate::Error::FrameIndexOutOfRange)
+    );
+}
+
+#[test]
+fn frame_iter_exact_size_matches_frames_len() {
+    let n = (44_100.0 * 0.6) as usize;
+    let samples = sine(n, 2, 44_100, 440.0, 8_000);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let it = dec.frame_iter();
+    let expected = dec.frames.len();
+    assert_eq!(
+        it.len(),
+        expected,
+        "ExactSizeIterator::len() must match frames.len()"
+    );
+    let (low, high) = it.size_hint();
+    assert_eq!(low, expected);
+    assert_eq!(high, Some(expected));
+}
+
+#[test]
+fn seek_to_sample_lands_in_right_frame() {
+    let n = (44_100.0 * 0.6) as usize;
+    let samples = sine(n, 1, 44_100, 660.0, 12_000);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let regular = dec.header.regular_frame_samples() as u64;
+    assert!(regular > 0, "regular_frame_samples must be > 0");
+    // Probe sample 0, mid-stream, last sample.
+    for &target in &[0u64, (n as u64) / 2, (n as u64) - 1] {
+        let sp = dec
+            .seek_to_sample(target)
+            .unwrap_or_else(|e| panic!("seek_to_sample({target}) failed: {e:?}"));
+        let frame_start = (sp.frame_index as u64) * regular;
+        let frame_end = frame_start + dec.frames[sp.frame_index].sample_count as u64;
+        assert!(
+            target >= frame_start && target < frame_end,
+            "target sample {target} fell outside frame {} [{frame_start}, {frame_end})",
+            sp.frame_index
+        );
+        assert_eq!(
+            sp.sample_offset_in_frame as u64,
+            target - frame_start,
+            "sample_offset_in_frame should equal target - frame_start"
+        );
+    }
+}
+
+#[test]
+fn frame_iter_from_past_end_is_empty() {
+    let samples = sine(128, 1, 44_100, 440.0, 12_000);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let past = dec.frames.len() + 5;
+    let it = dec.frame_iter_from(past);
+    assert_eq!(it.len(), 0);
+    let collected: Vec<_> = dec.frame_iter_from(past).collect();
+    assert!(collected.is_empty());
+}
+
+#[test]
+fn seek_to_sample_rejects_at_or_past_total_samples() {
+    let samples = sine(128, 1, 44_100, 440.0, 12_000);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let total = dec.header.total_samples as u64;
+    assert_eq!(
+        dec.seek_to_sample(total),
+        Err(crate::Error::SampleIndexOutOfRange)
+    );
+    assert_eq!(
+        dec.seek_to_sample(total + 100),
+        Err(crate::Error::SampleIndexOutOfRange)
+    );
+}
+
+#[test]
+fn frame_iter_streaming_seek_and_resume_bit_exact() {
+    // The integration property: seek to sample S, decode the
+    // containing frame plus all subsequent frames via the lazy
+    // iterator, skip the in-frame prefix, and the resulting
+    // interleaved samples must be the eager decode's tail from S.
+    let n = (44_100.0 * 0.5) as usize;
+    let samples = pseudo_noise(n, 2, 0x7FFF, 0xFEED_FACE);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+
+    let eager = decode(&tta).expect("eager").1;
+    let nch = 2usize;
+
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let target_sample = (n as u64) * 3 / 4; // ~75% in
+    let sp = dec.seek_to_sample(target_sample).expect("seek");
+
+    // Use `frame_iter_from` so the skipped prefix is not decoded —
+    // that is the whole point of the seek-resume API.
+    let mut got: Vec<i32> = Vec::new();
+    let mut emitted_frames = 0usize;
+    for (i_offset, r) in dec.frame_iter_from(sp.frame_index).enumerate() {
+        let i = sp.frame_index + i_offset;
+        let pcm = r.expect("decode frame");
+        if i == sp.frame_index {
+            let skip = sp.sample_offset_in_frame as usize * nch;
+            got.extend_from_slice(&pcm[skip..]);
+        } else {
+            got.extend_from_slice(&pcm);
+        }
+        emitted_frames += 1;
+    }
+    assert!(
+        emitted_frames >= 1,
+        "should have decoded at least one frame from the seek point"
+    );
+
+    let cursor = (target_sample as usize) * nch;
+    let expected_tail = &eager[cursor..];
+    assert_eq!(
+        got.len(),
+        expected_tail.len(),
+        "streaming-from-seek tail length must match eager tail"
+    );
+    assert_eq!(
+        got, expected_tail,
+        "streaming-from-seek must produce bit-identical PCM to the eager decode's tail"
+    );
+}
