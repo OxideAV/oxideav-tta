@@ -196,7 +196,7 @@ clean-room workspace.
 
 ## Fuzzing
 
-Three [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) harnesses
+Four [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) harnesses
 live under `fuzz/fuzz_targets/`:
 
 - **`decode`** (round 124) — feeds arbitrary bytes to both
@@ -222,12 +222,29 @@ live under `fuzz/fuzz_targets/`:
   samples equal the input bit-exactly. Three hand-crafted seeds
   cover format=1 mono16, format=2 stereo24-pw, and quad16. 500K
   iters clean (cov 688, ft 3221, ~18.5K exec/s).
+- **`streaming_decode`** (round 190) — drives the round-187
+  streaming + random-access decode surface on [`Decoder`](src/decoder.rs)
+  (`frame_iter`, `decode_frame_at`, `seek_to_sample`,
+  `frame_iter_from`). Asserts cross-API agreement on every fuzz-
+  constructed input: whenever the eager `decode_all` succeeds, the
+  lazy `frame_iter` must concatenate to the same PCM bit-exactly;
+  `decode_frame_at(target_frame_index)` must match the
+  corresponding eager slice; `seek_to_sample(target_sample_index)`
+  must return an in-range `(frame_index, sample_offset_in_frame)`
+  pair; and `frame_iter_from(start_index)` must equal the eager
+  suffix from the matching sample boundary. The fuzz input's first
+  ten bytes seed the random-access targets so attacker-chosen
+  frame / sample indices are driven against attacker-chosen byte
+  streams. Seed corpus under `fuzz/corpus/streaming_decode/` is the
+  five real-stream fixtures plus four crate-encoded multi-frame
+  streams (mono16/stereo16/stereo24 at 2.5-3 s + a format=2 stereo
+  3 s).
 
 The harness body is clean-room (no `libtta` oracle). Run locally with
 `cargo +nightly fuzz run <target>`; the `.github/workflows/fuzz.yml`
-shim points at the org reusable workflow which auto-discovers all
-three `[[bin]]` blocks in `fuzz/Cargo.toml` and splits the daily
-30-minute budget across them.
+shim points at the org reusable workflow which auto-discovers every
+`[[bin]]` block in `fuzz/Cargo.toml` and splits the daily 30-minute
+budget across them.
 
 The `decode` harness found one bug (round 124): a corrupt high-mode
 bitstream could chain enough Rice escapes to drive the adaptive

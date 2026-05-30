@@ -31,6 +31,15 @@ cargo-fuzz = true
 #   `Error::Unsupported…` / `InvalidSampleBuffer`, or produces bytes
 #   the in-crate decoder accepts and reconstructs to the original
 #   `i32` samples bit-exactly.
+# - **`streaming_decode`** (round 190): panic-free walk of the round-
+#   187 streaming + random-access decode surface on `Decoder`
+#   (`frame_iter`, `decode_frame_at`, `seek_to_sample`,
+#   `frame_iter_from`). Asserts cross-API agreement against the eager
+#   `decode_all` baseline on every fuzz-constructed input: the lazy
+#   `frame_iter` must concatenate to the eager output, `decode_frame_at`
+#   must match the eager slice, `seek_to_sample`'s returned indices
+#   must be in range, and `frame_iter_from(start)` must equal the
+#   eager suffix from the corresponding sample boundary.
 [dependencies]
 libfuzzer-sys = "0.4"
 
@@ -65,5 +74,11 @@ doc = false
 [[bin]]
 name = "encode_roundtrip"
 path = "fuzz_targets/encode_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "streaming_decode"
+path = "fuzz_targets/streaming_decode.rs"
 test = false
 doc = false

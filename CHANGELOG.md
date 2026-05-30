@@ -8,6 +8,36 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-190: `streaming_decode` cargo-fuzz target under
+  `fuzz/fuzz_targets/streaming_decode.rs`. Drives the round-187
+  streaming + random-access decode surface on `Decoder`
+  (`frame_iter`, `decode_frame_at`, `seek_to_sample`,
+  `frame_iter_from`) with attacker-chosen byte streams paired with
+  attacker-chosen `target_frame_index` / `target_sample_index` /
+  `start_index` seeds packed into the first ten bytes of the fuzz
+  input. Asserts cross-API agreement against the eager `decode_all`
+  baseline on every constructed input: the lazy `frame_iter` must
+  concatenate to the eager output bit-exactly, `decode_frame_at`
+  must match the corresponding eager slice, `seek_to_sample` must
+  return an in-range `(frame_index, sample_offset_in_frame)` pair,
+  and `frame_iter_from(start_index)` must equal the eager suffix
+  from the matching sample boundary. Contract is the standard
+  panic-free / no-integer-overflow / no-OOB / no-unbounded-alloc
+  shape the existing three fuzz targets share. Seed corpus under
+  `fuzz/corpus/streaming_decode/` includes the five real-stream
+  fixtures plus four crate-encoded multi-frame seeds (mono16 /
+  stereo16 / stereo24 spanning 2.5-3 s + a 3 s format=2 stereo
+  stream), each pre-prefixed with the ten-byte seed header so the
+  random-access branches are driven from the first fuzz iteration.
+  The fuzz workflow's auto-discovery picks up the new `[[bin]]`
+  block from `fuzz/Cargo.toml`; the daily 30-minute budget is now
+  split four-way across `decode`, `scan_trailers`,
+  `encode_roundtrip`, and `streaming_decode`. The cross-API
+  agreement assertion is gated on `frame_count <= 4096` so the
+  fuzzer's per-iteration budget stays on the streaming-state-
+  machine surface rather than the `total_samples * channels`
+  eager allocation.
+
 - Round-187: streaming + random-access decode API on `Decoder`.
   The new surface exposes:
   - `Decoder::frame_iter(&self) -> FrameIter` — lazy iterator that
