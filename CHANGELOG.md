@@ -29,6 +29,39 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-193: `benches/streaming.rs` Criterion harness covering the
+  round-187 streaming + random-access decode surface on `Decoder`
+  (`frame_iter`, `decode_frame_at`, `seek_to_sample`,
+  `frame_iter_from`). All four scenarios run against the same 3 s
+  stereo 16-bit 44.1 kHz stream (three frames under
+  `regular_frame_samples = 46_073` per `spec/01` §4.1), so the lazy
+  `frame_iter` cost is directly comparable to the eager `decode`
+  baseline (`decode.rs::decode_stereo_16bit_44k1_1s × 3`),
+  `decode_frame_at(1)` measures a single mid-stream random-access
+  decode worth of per-frame work (Rice + Stage-A LMS + Stage-B +
+  decorr cascade + CRC32 verify), `seek_to_sample` is the constant-
+  time `spec/01` §4.1 `sample_index / regular_frame_samples`
+  arithmetic (regression sentinel against accidentally turning it
+  into a linear walk of `self.frames`), and `frame_iter_from(1)`
+  is the resume-from-seek cost (= what an interactive seek-and-play
+  path actually pays on top of the constant-time
+  `seek_to_sample` lookup). The new bench follows the existing
+  decode/encode/roundtrip pattern: no checked-in fixture files,
+  per-bench `Throughput::Bytes` accounting against the PCM size,
+  same `xorshift32`-driven PCM generator the sibling benches use so
+  cross-bench numbers are directly comparable, and reuse of one
+  `Decoder<'a>` per scenario across iterations (legitimate because
+  every frame resets its trackers per `spec/01` §5.1 +
+  `spec/02..05` §3.1, so the decoder carries no decode state
+  between calls). Reference numbers on the development machine:
+  `frame_iter` 3 s ≈ 3.72 ms (~135 MiB/s),
+  `decode_frame_at(1)` ≈ 1.24 ms (~142 MiB/s),
+  `seek_to_sample` ≈ 1.07 ns (constant-time sentinel),
+  `frame_iter_from(1)` ≈ 2.74 ms (= ~2/3 of full-stream cost).
+  README `## Benchmarks` section grew the streaming entry; new
+  `[[bench]] name = "streaming"` block in `Cargo.toml`. Run with
+  `cargo bench -p oxideav-tta --bench streaming`.
+
 - Round-190: `streaming_decode` cargo-fuzz target under
   `fuzz/fuzz_targets/streaming_decode.rs`. Drives the round-187
   streaming + random-access decode surface on `Decoder`

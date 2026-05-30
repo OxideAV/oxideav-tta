@@ -294,4 +294,20 @@ xorshift-synthesised PCM workload. No checked-in fixture files: every
 input is built in-bench, then the production [`encode`](src/lib.rs)
 turns it into a TTA1 byte stream for the decoder benches to consume.
 
-Run locally with `cargo bench -p oxideav-tta --bench <decode|encode|roundtrip>`.
+Round 193 adds `benches/streaming.rs`, a fourth Criterion harness
+covering the round-187 streaming + random-access decode surface on
+[`Decoder`](src/decoder.rs) — `frame_iter`, `decode_frame_at`,
+`seek_to_sample`, and `frame_iter_from`. All four scenarios run
+against the same 3 s stereo 16-bit 44.1 kHz stream (three frames
+under `regular_frame_samples = 46_073`), so the lazy `frame_iter`
+cost is directly comparable to the eager `decode` baseline,
+`decode_frame_at(1)` measures a single mid-stream random-access
+decode, `seek_to_sample` is the constant-time `spec/01` §4.1 sample →
+frame arithmetic, and `frame_iter_from(1)` is the resume-from-seek
+cost. Reference numbers on the development machine: `frame_iter` 3 s
+≈ 3.72 ms (~135 MiB/s), `decode_frame_at(1)` ≈ 1.24 ms (~142 MiB/s),
+`seek_to_sample` ≈ 1.07 ns (constant-time sentinel),
+`frame_iter_from(1)` ≈ 2.74 ms — the resume cost lands at roughly
+2/3 of the full-stream cost as expected (= 2 of 3 frames decoded).
+
+Run locally with `cargo bench -p oxideav-tta --bench <decode|encode|roundtrip|streaming>`.

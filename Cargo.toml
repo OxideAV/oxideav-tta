@@ -52,3 +52,12 @@ harness = false
 [[bench]]
 name = "roundtrip"
 harness = false
+
+# Round 193 (streaming + random-access bench): covers the round-187
+# decode surface on `Decoder` (`frame_iter`, `decode_frame_at`,
+# `seek_to_sample`, `frame_iter_from`). Same self-contained pattern
+# as the other three benches (no checked-in fixtures; PCM synthesised
+# in-bench then run through the production `encode`).
+[[bench]]
+name = "streaming"
+harness = false
