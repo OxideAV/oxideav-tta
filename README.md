@@ -310,4 +310,29 @@ cost. Reference numbers on the development machine: `frame_iter` 3 s
 `frame_iter_from(1)` ≈ 2.74 ms — the resume cost lands at roughly
 2/3 of the full-stream cost as expected (= 2 of 3 frames decoded).
 
+Round 198 extends `benches/streaming.rs` with two parameter-cube
+groups so the streaming surface has an A/B baseline at every shape
+the eager `decode.rs` baseline covers, not just the original
+stereo16-44k1 anchor:
+
+- `streaming_frame_iter_cube` — walks `frame_iter` across three
+  format=1 cells (`mono16_44k1_1s`, `stereo24_48k_500ms`,
+  `ch6_16bit_48k_250ms`).
+- `streaming_decode_frame_at_cube` — picks the middle frame of each
+  same-shape cell (or frame 0 for single-frame cells) and measures
+  random-access decode cost per shape.
+
+Reference numbers on the development machine (`--quick`, 1 s
+warmup): `streaming_frame_iter_cube/mono16_44k1_1s` ≈ 566 µs
+(~148 MiB/s), `…/stereo24_48k_500ms` ≈ 626 µs (~219 MiB/s),
+`…/ch6_16bit_48k_250ms` ≈ 974 µs (~141 MiB/s);
+`streaming_decode_frame_at_cube/mono16_44k1_1s` ≈ 561 µs
+(~150 MiB/s), `…/stereo24_48k_500ms` ≈ 600 µs (~229 MiB/s),
+`…/ch6_16bit_48k_250ms` ≈ 960 µs (~143 MiB/s). Format=2 is
+intentionally omitted from these cube groups — the current public
+streaming surface (`Decoder::new` → `frame_iter` /
+`decode_frame_at`) is format=1 only; the format=2 path goes through
+the eager [`decode_with_password`](src/lib.rs), which is already
+benchmarked by `decode.rs::decode_stereo_16bit_44k1_format2_1s`.
+
 Run locally with `cargo bench -p oxideav-tta --bench <decode|encode|roundtrip|streaming>`.

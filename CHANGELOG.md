@@ -6,6 +6,28 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Round-198: parameter-cube extension of `benches/streaming.rs`. Two
+  new Criterion groups walk the format=1 `(channels × bps ×
+  sample_rate)` cube already covered by the sibling `decode.rs`
+  baseline (mono16-44k1-1s, stereo24-48k-500ms, 6ch16-48k-250ms):
+  `streaming_frame_iter_cube` measures lazy `frame_iter` cost per
+  cell, and `streaming_decode_frame_at_cube` measures the middle-
+  frame (or frame 0 for single-frame cells) random-access decode
+  cost per cell. The original four scenarios anchored at the
+  stereo16-44k1 point are preserved unchanged as the per-API
+  comparison anchor; the cube is additive so future optimisation
+  rounds get A/B baselines across the actual TTA parameter space
+  rather than only the original single cell. Format=2 is
+  intentionally omitted from the cube: the public streaming surface
+  (`Decoder::new` → `frame_iter` / `decode_frame_at`) is format=1
+  only, and the eager `decode_with_password` path is already
+  covered by `decode.rs::decode_stereo_16bit_44k1_format2_1s`. PCM
+  inputs reuse the existing in-bench `build_pcm` helper (xorshift32
+  envelope + per-sample noise) so the workload is identical to the
+  other three benches; no checked-in fixtures.
+
 ## [0.0.2](https://github.com/OxideAV/oxideav-tta/compare/v0.0.1...v0.0.2) - 2026-05-30
 
 ### Other

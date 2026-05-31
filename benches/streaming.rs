@@ -12,11 +12,32 @@
 //! reset, hoisting the qm priming write out of the hot init loop) has
 //! no baseline to A/B against.
 //!
-//! All four entry points decode against the **same** multi-frame stream
-//! (3 seconds of synthesised stereo 16-bit PCM at 44.1 kHz, which
-//! `regular_frame_samples = floor(44_100 * 256 / 245) = 46_073` per
-//! `spec/01` §4.1 splits across **three** TTA frames — two full +
-//! one tail), so the scenarios are directly comparable:
+//! Round 198 (depth-mode parameter-cube extension): the original four
+//! scenarios all run against a single 3 s stereo 16-bit 44.1 kHz
+//! stream, which mirrors only one cell of the parameter cube the
+//! sibling `decode.rs` / `encode.rs` / `roundtrip.rs` benches cover
+//! (mono16, stereo16, stereo24, 6ch16, format=2). The r198 addition
+//! adds a `streaming_frame_iter_cube` group that walks `frame_iter`
+//! across the format=1 sub-cube (mono16-44k1-1s, stereo24-48k-500ms,
+//! 6ch16-48k-250ms), plus a `streaming_decode_frame_at_cube` group
+//! that picks the middle frame of each cell so random-access cost is
+//! visible per shape (single-frame cells pick frame 0). Format=2 is
+//! omitted because the current public streaming surface
+//! (`Decoder::new` → `frame_iter` / `decode_frame_at`) is format=1
+//! only — format=2 reaches PCM through the eager
+//! [`oxideav_tta::decode_with_password`] path, which is already
+//! benchmarked by `decode.rs::decode_stereo_16bit_44k1_format2_1s`.
+//! These scenarios give future optimisation rounds A/B baselines
+//! across the actual TTA parameter space rather than the original
+//! single stereo16-44k1 point. The original four scenarios are kept
+//! verbatim as the per-API comparison anchor — the new scenarios are
+//! additive.
+//!
+//! All four (original) entry points decode against the **same** multi-
+//! frame stream (3 seconds of synthesised stereo 16-bit PCM at 44.1
+//! kHz, which `regular_frame_samples = floor(44_100 * 256 / 245) =
+//! 46_073` per `spec/01` §4.1 splits across **three** TTA frames — two
+//! full + one tail), so the scenarios are directly comparable:
 //!
 //!   - **streaming_frame_iter_3s_stereo16**: sequential lazy decode
 //!     via `frame_iter`. Should be within noise of the eager
@@ -210,11 +231,135 @@ fn bench_streaming_frame_iter_from_middle(c: &mut Criterion) {
     g.finish();
 }
 
+// ───────────── r198 parameter-cube extension ─────────────
+//
+// The four original scenarios above are anchored to a single 3 s
+// stereo 16-bit 44.1 kHz stream so the per-API costs (frame_iter vs
+// decode_all vs decode_frame_at vs seek_to_sample vs frame_iter_from)
+// are directly comparable on identical PCM. The scenarios below sweep
+// the streaming `frame_iter` (and the random-access `decode_frame_at`)
+// across the same shape cube the sibling `decode.rs` baseline covers
+// (mono16-44k1-1s, stereo24-48k-500ms, 6ch16-48k-250ms, format=2
+// stereo16-44k1-1s) so future optimisation rounds — e.g. caching the
+// per-channel Stage-A LMS init, hoisting the qm priming write,
+// switching the per-frame CRC32 verify off the byte loop, batching the
+// Rice unary fast path on wide-residual 24-bit input — have an A/B
+// baseline per parameter cell rather than only at the stereo16
+// anchor. PCM is built with the same `build_pcm` helper used by the
+// other three benches so the synthesised workload is the same as the
+// eager `decode.rs` numbers; no checked-in fixtures.
+
+/// Build the multi-frame TTA1 byte stream for one parameter-cube cell
+/// and return `(per_channel_samples, channels, bits_per_sample,
+/// tta_bytes)` so callers can set `Throughput` against the PCM size.
+fn build_cube_stream(
+    n_samples: usize,
+    channels: u16,
+    bits_per_sample: u16,
+    sample_rate: u32,
+) -> (usize, u16, u16, Vec<u8>) {
+    let pcm = build_pcm(n_samples, channels, bits_per_sample);
+    let tta = encode(&pcm, channels, bits_per_sample, sample_rate).expect("cube encode");
+    (n_samples, channels, bits_per_sample, tta)
+}
+
+/// Sweep `frame_iter` across the (channels × bps × sample_rate) cube.
+/// Each cell builds its TTA byte stream once at bench setup, constructs
+/// the [`Decoder`] once, then iterates `frame_iter` per bench sample.
+/// The per-iteration work is the full Rice + Stage-A LMS + Stage-B +
+/// decorrelation cascade across every frame in the stream — exactly
+/// what the eager `decode.rs` baseline measures, but routed through the
+/// lazy iterator so any future optimisation that changes only one of
+/// the two paths surfaces here.
+///
+/// Format=2 is intentionally **omitted** from this cube: the streaming
+/// surface (`Decoder::new` → `frame_iter`) is format=1-only via the
+/// current public API. The format=2 path is reached through
+/// [`oxideav_tta::decode_with_password`], which is an eager call rather
+/// than a streaming one. Adding a streaming format=2 bench cell would
+/// either require widening the public API surface (a separate
+/// concern from this depth-mode bench round) or fall back to the eager
+/// `decode_with_password` — which is already covered by the
+/// `decode.rs` baseline cell `decode_stereo_16bit_44k1_format2_1s`. So
+/// the streaming cube tracks format=1 only and the eager bench covers
+/// format=2.
+fn bench_streaming_frame_iter_cube(c: &mut Criterion) {
+    // (name, n_samples, channels, bps, sample_rate)
+    let cells: &[(&str, usize, u16, u16, u32)] = &[
+        ("mono16_44k1_1s", 44_100, 1, 16, 44_100),
+        ("stereo24_48k_500ms", 24_000, 2, 24, 48_000),
+        ("ch6_16bit_48k_250ms", 12_000, 6, 16, 48_000),
+    ];
+    let mut g = c.benchmark_group("streaming_frame_iter_cube");
+    g.sample_size(20);
+    for (label, n, nch, bps, sr) in cells.iter().copied() {
+        let (_, _, _, tta) = build_cube_stream(n, nch, bps, sr);
+        let dec = Decoder::new(&tta).expect("decoder construct");
+        g.throughput(Throughput::Bytes(
+            (n * (bps as usize / 8) * nch as usize) as u64,
+        ));
+        g.bench_function(BenchmarkId::from_parameter(label), |b| {
+            b.iter(|| {
+                let dec = criterion::black_box(&dec);
+                let mut total = 0usize;
+                for frame in dec.frame_iter() {
+                    let pcm = frame.expect("frame decode");
+                    total = total.wrapping_add(pcm.len());
+                }
+                criterion::black_box(total);
+            });
+        });
+    }
+    g.finish();
+}
+
+/// Sweep `decode_frame_at` across the same cube as
+/// `bench_streaming_frame_iter_cube`. For multi-frame cells the target
+/// is `frames.len() / 2` (middle frame); single-frame cells decode
+/// frame 0 so the bench still reports a measurement for that shape
+/// rather than silently skipping. Random-access cost is the per-frame
+/// init (LMS and Rice tracker reset) plus the single frame's Rice,
+/// LMS, Stage-B and decorrelation work — i.e. what an MKV or MP4
+/// cue-driven seek-then-play would pay per landing point. Per the
+/// format=2 omission rationale above, this cube tracks format=1 only.
+fn bench_streaming_decode_frame_at_cube(c: &mut Criterion) {
+    let cells: &[(&str, usize, u16, u16, u32)] = &[
+        ("mono16_44k1_1s", 44_100, 1, 16, 44_100),
+        ("stereo24_48k_500ms", 24_000, 2, 24, 48_000),
+        ("ch6_16bit_48k_250ms", 12_000, 6, 16, 48_000),
+    ];
+    let mut g = c.benchmark_group("streaming_decode_frame_at_cube");
+    g.sample_size(20);
+    for (label, n, nch, bps, sr) in cells.iter().copied() {
+        let (_, _, _, tta) = build_cube_stream(n, nch, bps, sr);
+        let dec = Decoder::new(&tta).expect("decoder construct");
+        let n_frames = dec.frames.len();
+        // Pick the middle frame for multi-frame streams; fall back to
+        // frame 0 for the rare single-frame shape so every cube cell
+        // contributes a measurement.
+        let target = if n_frames > 1 { n_frames / 2 } else { 0 };
+        let frame_pcm_samples = dec.frames[target].sample_count as usize;
+        g.throughput(Throughput::Bytes(
+            (frame_pcm_samples * (bps as usize / 8) * nch as usize) as u64,
+        ));
+        g.bench_function(BenchmarkId::from_parameter(label), |b| {
+            b.iter(|| {
+                let dec = criterion::black_box(&dec);
+                let pcm = dec.decode_frame_at(target).expect("decode_frame_at");
+                criterion::black_box(pcm.len());
+            });
+        });
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_streaming_frame_iter,
     bench_streaming_decode_frame_at_middle,
     bench_streaming_seek_to_sample_middle,
     bench_streaming_frame_iter_from_middle,
+    bench_streaming_frame_iter_cube,
+    bench_streaming_decode_frame_at_cube,
 );
 criterion_main!(benches);
