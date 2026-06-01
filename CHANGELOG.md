@@ -8,6 +8,75 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-204: public `Decoder::new_with_password(bytes, password)`
+  constructor that brings the round-187 streaming + random-access
+  decode surface (`frame_iter`, `decode_frame_at`, `seek_to_sample`,
+  `frame_iter_from`) onto format=2 (password-protected, `spec/07`)
+  streams. Until r204 the streaming surface was reachable only via
+  `Decoder::new`, which rejects format=2 with
+  `Error::PasswordRequired`; format=2 streams therefore had to go
+  through the eager `decode_with_password` path and could not take
+  advantage of bounded-memory iteration or random-access by
+  seek-table index. The new constructor derives the eight-byte
+  ECMA-182 CRC-64 digest of the password per `spec/07` §3.2 and
+  applies it as the Stage-A `qm[0..7]` priming at every per-channel
+  frame init per `spec/07` §3.5–§3.6, then exposes the resulting
+  `Decoder` as a public API. A format=1 stream constructed via the
+  same call is a transparent alias for `Decoder::new`: the priming is
+  computed but dropped on the constructed decoder via the existing
+  crate-internal `clear_priming` path so the format=1 zero-init
+  invariant of `spec/02` §3.1 is preserved (audit/07 §6.2-2,
+  same shape as the eager `decode_with_password`). Six new tests in
+  `roundtrip_tests` lock the new surface:
+  - `new_with_password_format2_streaming_matches_eager_stereo_16bit`
+    — frame_iter / decode_frame_at / frame_iter_from on a 2 s stereo16
+    44.1 kHz format=2 stream all match the eager
+    `decode_with_password` PCM bit-exactly across every frame.
+  - `new_with_password_seek_to_sample_format2_lands_in_right_frame`
+    — `seek_to_sample` on a 2.5 s format=2 stream lands in the right
+    frame at samples 0, mid, end and `sample_offset_in_frame` matches
+    the residue.
+  - `new_with_password_format2_seek_and_resume_bit_exact` — the
+    integration property: seek to ~75 % through a 2.5 s format=2
+    stream, decode via `frame_iter_from`, skip the in-frame prefix,
+    compare against the eager `decode_with_password` tail. Bit-exact.
+  - `new_with_password_format1_stream_drops_unused_priming` — a
+    format=1 stream constructed via `new_with_password` decodes
+    bit-identically to `Decoder::new` (both `decode_all` and
+    `frame_iter`); the unused digest is dropped per audit/07 §6.2-2.
+  - `new_with_password_format2_wrong_password_decodes_but_corrupts`
+    — `spec/07` §11 (no MAC): a wrong password produces a
+    successfully-decoded stream of corrupt PCM (no panic, no spurious
+    `Crc32Mismatch` — the CRC is over the bitstream, not over
+    post-Stage-A samples). Right-password decode bit-exactly
+    round-trips the originals; wrong-password decode preserves the
+    shape but produces distinct PCM.
+  - `new_with_password_format2_out_of_range_index_errors` — the
+    same `FrameIndexOutOfRange` / `SampleIndexOutOfRange` rejection
+    shape as the format=1 surface, on a format=2 stream.
+
+  Round-204 also extends `benches/streaming.rs` with a
+  `stereo16_44k1_1s_format2` cell in both `streaming_frame_iter_cube`
+  and `streaming_decode_frame_at_cube`, closing the prior cube's
+  format=2 omission. The cell uses the new
+  `Decoder::new_with_password` constructor at the same parameter
+  point as the format=1 anchor (`stereo16` × `16-bit` × `44.1 kHz` ×
+  `1 s`), so the marginal cost of the per-frame qm re-prime is
+  directly comparable against the format=1 baseline. Reference
+  numbers on the development machine (`--bench --quick`):
+  `streaming_frame_iter_cube/stereo16_44k1_1s_format2` ≈ 1.22 ms
+  (~138 MiB/s); `streaming_decode_frame_at_cube/stereo16_44k1_1s_format2`
+  ≈ 1.20 ms (~140 MiB/s) — within noise of the format=1 sibling at
+  the same shape. README `## Status` + `## Benchmarks` sections grew
+  the r204 entries; bench file-head documentation gains a "Round
+  204 (format=2 streaming reach)" paragraph; `lib.rs` `## Public API`
+  section flags the new constructor on `Decoder`. Lib-test count:
+  90 → 96 (+6 in `roundtrip_tests`); integration tests unchanged at
+  9. No
+  changes to the existing decoder hot path; the new constructor is a
+  thin wrapper over the existing `Decoder::new_with_priming` plus
+  the existing `clear_priming` invariant restoration.
+
 - Round-198: parameter-cube extension of `benches/streaming.rs`. Two
   new Criterion groups walk the format=1 `(channels × bps ×
   sample_rate)` cube already covered by the sibling `decode.rs`

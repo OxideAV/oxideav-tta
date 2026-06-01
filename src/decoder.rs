@@ -273,14 +273,66 @@ pub struct Decoder<'a> {
 impl<'a> Decoder<'a> {
     /// Parse `bytes` as a TTA1 file (with optional ID3v2 prefix) and
     /// return a [`Decoder`] ready to walk the frames.
+    ///
+    /// Accepts format=1 streams only — format=2 (password-protected,
+    /// `spec/07`) streams return [`Error::PasswordRequired`]. Use
+    /// [`Decoder::new_with_password`] to construct a streaming decoder
+    /// over a format=2 stream.
     pub fn new(bytes: &'a [u8]) -> Result<Self> {
         Self::new_with_priming(bytes, None)
     }
 
+    /// Parse `bytes` as a TTA1 file (with optional ID3v2 prefix) using
+    /// `password` to derive the Stage-A `qm[0..7]` priming vector per
+    /// `spec/07` §3, and return a [`Decoder`] ready to walk the frames.
+    ///
+    /// This is the streaming + random-access counterpart to the eager
+    /// [`crate::decode_with_password`] entry point. With the returned
+    /// [`Decoder`] in hand, callers can drive [`Decoder::frame_iter`],
+    /// [`Decoder::decode_frame_at`], [`Decoder::seek_to_sample`], and
+    /// [`Decoder::frame_iter_from`] across format=2 streams under the
+    /// same bounded-memory / random-access discipline the round-187
+    /// surface already provides for format=1.
+    ///
+    /// Both format=1 and format=2 streams are accepted (this is the
+    /// streaming-API analogue of [`crate::decode_with_password`]'s
+    /// "accepts format=1 with an unused digest" tolerance):
+    ///
+    /// - For format=2 streams, the password is hashed with ECMA-182
+    ///   CRC-64 per `spec/07` §3.2 and the resulting eight-byte digest
+    ///   is applied as the Stage-A `qm[0..7]` priming at every
+    ///   per-channel frame init per `spec/07` §3.5–§3.6. An empty
+    ///   password produces an all-zero digest per `spec/07` §9 item 2.
+    /// - For format=1 streams, the priming is computed but the
+    ///   format=1 zero-init invariant of `spec/02` §3.1 is preserved —
+    ///   the computed digest is dropped on the constructed [`Decoder`]
+    ///   via the same `clear_priming` path that [`crate::decode_with_password`]
+    ///   takes (audit/07 §6.2-2).
+    ///
+    /// Returns the same [`Error`] variants as [`Decoder::new`] (header
+    /// CRC, seek-table parse, unsupported format), with the
+    /// [`Error::PasswordRequired`] gate lifted because a password is
+    /// supplied.
+    pub fn new_with_password(bytes: &'a [u8], password: &[u8]) -> Result<Self> {
+        let priming = crate::password::derive_qm_priming(password);
+        let mut dec = Self::new_with_priming(bytes, Some(priming))?;
+        // Format=1 with password supplied: the digest is computed but
+        // must not mutate decode state. Drop the priming on the
+        // constructed decoder so format=1's spec/02 §3.1 zero-init
+        // invariant is preserved without re-parsing the header /
+        // seek table (closes audit/07 §6.2-2, same shape as the eager
+        // `decode_with_password` path).
+        if dec.header.format == 1 {
+            dec.clear_priming();
+        }
+        Ok(dec)
+    }
+
     /// Like [`Self::new`] but accepts a Stage-A LMS `qm` priming
     /// vector for format=2 streams (per spec/07 §3.5). Public callers
-    /// should use [`crate::decode_with_password`] instead, which
-    /// computes the priming from a password automatically.
+    /// should use [`Self::new_with_password`] or
+    /// [`crate::decode_with_password`] instead, which compute the
+    /// priming from a password automatically.
     pub(crate) fn new_with_priming(bytes: &'a [u8], qm_priming: Option<[i32; 8]>) -> Result<Self> {
         let id3_skip = crate::header::skip_id3v2_prefix(bytes)?;
         let after_id3 = &bytes[id3_skip..];

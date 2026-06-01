@@ -21,17 +21,25 @@
 //! across the format=1 sub-cube (mono16-44k1-1s, stereo24-48k-500ms,
 //! 6ch16-48k-250ms), plus a `streaming_decode_frame_at_cube` group
 //! that picks the middle frame of each cell so random-access cost is
-//! visible per shape (single-frame cells pick frame 0). Format=2 is
-//! omitted because the current public streaming surface
-//! (`Decoder::new` → `frame_iter` / `decode_frame_at`) is format=1
-//! only — format=2 reaches PCM through the eager
-//! [`oxideav_tta::decode_with_password`] path, which is already
-//! benchmarked by `decode.rs::decode_stereo_16bit_44k1_format2_1s`.
-//! These scenarios give future optimisation rounds A/B baselines
-//! across the actual TTA parameter space rather than the original
-//! single stereo16-44k1 point. The original four scenarios are kept
-//! verbatim as the per-API comparison anchor — the new scenarios are
-//! additive.
+//! visible per shape (single-frame cells pick frame 0). These
+//! scenarios give future optimisation rounds A/B baselines across the
+//! actual TTA parameter space rather than the original single
+//! stereo16-44k1 point. The original four scenarios are kept verbatim
+//! as the per-API comparison anchor — the new scenarios are additive.
+//!
+//! Round 204 (format=2 streaming reach): the round-187 streaming +
+//! random-access surface is now reachable for password-protected
+//! (format=2) streams via the new public
+//! [`Decoder::new_with_password`] constructor. The r204 addition
+//! plants a `stereo16_44k1_1s_format2` cell in both cube groups
+//! (`streaming_frame_iter_cube`, `streaming_decode_frame_at_cube`) at
+//! the same `stereo16_44k1_1s` shape the format=1 anchor uses, so the
+//! marginal cost of the per-frame qm re-prime (`spec/07` §3.5–§3.6)
+//! is directly comparable against the format=1 baseline. The
+//! `decode.rs::decode_stereo_16bit_44k1_format2_1s` cell already
+//! measures the eager `decode_with_password` cost; the streaming
+//! cube cells now extend that coverage to the lazy `frame_iter` and
+//! random-access `decode_frame_at` paths.
 //!
 //! All four (original) entry points decode against the **same** multi-
 //! frame stream (3 seconds of synthesised stereo 16-bit PCM at 44.1
@@ -72,7 +80,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use oxideav_tta::{encode, Decoder};
+use oxideav_tta::{encode, encode_with_password, Decoder};
 
 /// Cheap deterministic xorshift32 — mirrors the helper used in the
 /// other three TTA bench harnesses (`decode.rs`, `encode.rs`,
@@ -263,26 +271,48 @@ fn build_cube_stream(
     (n_samples, channels, bits_per_sample, tta)
 }
 
-/// Sweep `frame_iter` across the (channels × bps × sample_rate) cube.
-/// Each cell builds its TTA byte stream once at bench setup, constructs
-/// the [`Decoder`] once, then iterates `frame_iter` per bench sample.
-/// The per-iteration work is the full Rice + Stage-A LMS + Stage-B +
-/// decorrelation cascade across every frame in the stream — exactly
-/// what the eager `decode.rs` baseline measures, but routed through the
-/// lazy iterator so any future optimisation that changes only one of
-/// the two paths surfaces here.
+/// Same shape as [`build_cube_stream`] but encodes the PCM as a
+/// format=2 stream with the supplied password. Used by the
+/// round-204 streaming cube cell that exercises the new
+/// [`Decoder::new_with_password`] streaming path against the
+/// password-derived qm priming (`spec/07` §3.5–§3.6) — the eager
+/// path is already covered by the sibling
+/// `decode.rs::decode_stereo_16bit_44k1_format2_1s`.
+fn build_cube_stream_password(
+    n_samples: usize,
+    channels: u16,
+    bits_per_sample: u16,
+    sample_rate: u32,
+    password: &[u8],
+) -> (usize, u16, u16, Vec<u8>) {
+    let pcm = build_pcm(n_samples, channels, bits_per_sample);
+    let tta = encode_with_password(&pcm, channels, bits_per_sample, sample_rate, password)
+        .expect("cube encode format=2");
+    (n_samples, channels, bits_per_sample, tta)
+}
+
+/// Sweep `frame_iter` across the (channels × bps × sample_rate) cube
+/// plus the round-204 format=2 cell. Each cell builds its TTA byte
+/// stream once at bench setup, constructs the [`Decoder`] once, then
+/// iterates `frame_iter` per bench sample. The per-iteration work is
+/// the full Rice + Stage-A LMS + Stage-B + decorrelation cascade
+/// across every frame in the stream — exactly what the eager
+/// `decode.rs` baseline measures, but routed through the lazy
+/// iterator so any future optimisation that changes only one of the
+/// two paths surfaces here.
 ///
-/// Format=2 is intentionally **omitted** from this cube: the streaming
-/// surface (`Decoder::new` → `frame_iter`) is format=1-only via the
-/// current public API. The format=2 path is reached through
-/// [`oxideav_tta::decode_with_password`], which is an eager call rather
-/// than a streaming one. Adding a streaming format=2 bench cell would
-/// either require widening the public API surface (a separate
-/// concern from this depth-mode bench round) or fall back to the eager
-/// `decode_with_password` — which is already covered by the
-/// `decode.rs` baseline cell `decode_stereo_16bit_44k1_format2_1s`. So
-/// the streaming cube tracks format=1 only and the eager bench covers
-/// format=2.
+/// **Round-204 format=2 cell** (`stereo16_44k1_1s_format2`) closes
+/// the prior cube's format=2 omission: round 204 added the public
+/// [`Decoder::new_with_password`] constructor so the streaming +
+/// random-access surface is reachable for format=2 streams too. The
+/// per-frame qm re-prime (`spec/07` §3.5–§3.6) lives entirely inside
+/// [`Decoder::decode_frame_at`]'s init block, so the streaming cost
+/// is dominated by the same Rice / Stage-A / Stage-B / decorr cascade
+/// as the format=1 cells; the cell measures the marginal cost of the
+/// per-frame qm priming write against the format=1 sibling at the
+/// same parameter point (`stereo16_44k1_1s`). PCM is built with the
+/// same `build_pcm` helper so the workload is identical to the
+/// format=1 cell; the only difference is the encode path.
 fn bench_streaming_frame_iter_cube(c: &mut Criterion) {
     // (name, n_samples, channels, bps, sample_rate)
     let cells: &[(&str, usize, u16, u16, u32)] = &[
@@ -310,18 +340,56 @@ fn bench_streaming_frame_iter_cube(c: &mut Criterion) {
             });
         });
     }
+
+    // Round-204 format=2 cell — reuse the stereo16-44k1-1s parameter
+    // point as the format=1 anchor so the marginal cost of the
+    // per-frame qm re-prime (`spec/07` §3.5–§3.6) is visible against
+    // an identical-shape baseline. Decoder constructed via
+    // `Decoder::new_with_password`, then the bench iterates the same
+    // `frame_iter` API as the format=1 cells.
+    let n_fmt2 = 44_100usize;
+    let nch_fmt2: u16 = 2;
+    let bps_fmt2: u16 = 16;
+    let (_, _, _, tta_fmt2) = build_cube_stream_password(
+        n_fmt2,
+        nch_fmt2,
+        bps_fmt2,
+        44_100,
+        b"oxideav-tta-r204-bench",
+    );
+    let dec_fmt2 = Decoder::new_with_password(&tta_fmt2, b"oxideav-tta-r204-bench")
+        .expect("format=2 streaming decoder construct");
+    g.throughput(Throughput::Bytes(
+        (n_fmt2 * (bps_fmt2 as usize / 8) * nch_fmt2 as usize) as u64,
+    ));
+    g.bench_function(
+        BenchmarkId::from_parameter("stereo16_44k1_1s_format2"),
+        |b| {
+            b.iter(|| {
+                let dec = criterion::black_box(&dec_fmt2);
+                let mut total = 0usize;
+                for frame in dec.frame_iter() {
+                    let pcm = frame.expect("frame decode");
+                    total = total.wrapping_add(pcm.len());
+                }
+                criterion::black_box(total);
+            });
+        },
+    );
     g.finish();
 }
 
 /// Sweep `decode_frame_at` across the same cube as
-/// `bench_streaming_frame_iter_cube`. For multi-frame cells the target
-/// is `frames.len() / 2` (middle frame); single-frame cells decode
-/// frame 0 so the bench still reports a measurement for that shape
-/// rather than silently skipping. Random-access cost is the per-frame
-/// init (LMS and Rice tracker reset) plus the single frame's Rice,
-/// LMS, Stage-B and decorrelation work — i.e. what an MKV or MP4
-/// cue-driven seek-then-play would pay per landing point. Per the
-/// format=2 omission rationale above, this cube tracks format=1 only.
+/// `bench_streaming_frame_iter_cube`, plus the round-204 format=2
+/// cell. For multi-frame cells the target is `frames.len() / 2`
+/// (middle frame); single-frame cells decode frame 0 so the bench
+/// still reports a measurement for that shape rather than silently
+/// skipping. Random-access cost is the per-frame init (LMS and Rice
+/// tracker reset) plus the single frame's Rice, LMS, Stage-B and
+/// decorrelation work — i.e. what an MKV or MP4 cue-driven
+/// seek-then-play would pay per landing point. The format=2 cell at
+/// the same `stereo16_44k1_1s` shape adds the per-frame qm re-prime
+/// write (`spec/07` §3.5–§3.6) on top of the format=1 baseline.
 fn bench_streaming_decode_frame_at_cube(c: &mut Criterion) {
     let cells: &[(&str, usize, u16, u16, u32)] = &[
         ("mono16_44k1_1s", 44_100, 1, 16, 44_100),
@@ -350,6 +418,40 @@ fn bench_streaming_decode_frame_at_cube(c: &mut Criterion) {
             });
         });
     }
+
+    // Round-204 format=2 cell at the stereo16-44k1-1s anchor.
+    let n_fmt2 = 44_100usize;
+    let nch_fmt2: u16 = 2;
+    let bps_fmt2: u16 = 16;
+    let (_, _, _, tta_fmt2) = build_cube_stream_password(
+        n_fmt2,
+        nch_fmt2,
+        bps_fmt2,
+        44_100,
+        b"oxideav-tta-r204-bench",
+    );
+    let dec_fmt2 = Decoder::new_with_password(&tta_fmt2, b"oxideav-tta-r204-bench")
+        .expect("format=2 streaming decoder construct");
+    let n_frames_fmt2 = dec_fmt2.frames.len();
+    let target_fmt2 = if n_frames_fmt2 > 1 {
+        n_frames_fmt2 / 2
+    } else {
+        0
+    };
+    let frame_pcm_samples_fmt2 = dec_fmt2.frames[target_fmt2].sample_count as usize;
+    g.throughput(Throughput::Bytes(
+        (frame_pcm_samples_fmt2 * (bps_fmt2 as usize / 8) * nch_fmt2 as usize) as u64,
+    ));
+    g.bench_function(
+        BenchmarkId::from_parameter("stereo16_44k1_1s_format2"),
+        |b| {
+            b.iter(|| {
+                let dec = criterion::black_box(&dec_fmt2);
+                let pcm = dec.decode_frame_at(target_fmt2).expect("decode_frame_at");
+                criterion::black_box(pcm.len());
+            });
+        },
+    );
     g.finish();
 }
 

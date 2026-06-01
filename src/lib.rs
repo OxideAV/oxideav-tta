@@ -67,6 +67,10 @@
 //!   (random-access by frame index), and the
 //!   [`Decoder::seek_to_sample`] / [`Decoder::frame_iter_from`]
 //!   pair for resume-from-sample seeking via the seek table.
+//!   [`Decoder::new`] constructs over a format=1 stream;
+//!   [`Decoder::new_with_password`] constructs over either format and
+//!   wires the `spec/07` qm priming for format=2 streams, so the same
+//!   streaming + random-access surface is reachable for both formats.
 //! - [`Error`] — crate-local error type.
 //!
 //! All identifiers are documented; see each module for the spec

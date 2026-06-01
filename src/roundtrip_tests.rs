@@ -989,3 +989,269 @@ fn frame_iter_streaming_seek_and_resume_bit_exact() {
         "streaming-from-seek must produce bit-identical PCM to the eager decode's tail"
     );
 }
+
+// ---------------------------------------------------------------
+// Round 204 — streaming + random-access decode surface on format=2
+// (password-protected) streams. The round-187 surface (frame_iter,
+// decode_frame_at, seek_to_sample, frame_iter_from) is now reachable
+// for format=2 via the new public constructor
+// `Decoder::new_with_password(bytes, password)`. The properties
+// under test mirror the format=1 streaming suite above:
+//
+//   1. `Decoder::new_with_password` rejects a format=2 stream with the
+//      wrong-password digest the same way the eager
+//      `decode_with_password` does — no panic, no spurious
+//      `PasswordRequired` rejection, and (per spec/07 §11 "no MAC")
+//      the per-frame CRC32 still validates because the CRC is taken
+//      over the encoded bitstream, not the post-Stage-A samples.
+//      A wrong password therefore produces a successfully-decoded
+//      stream of corrupt PCM (the spec-correct behaviour).
+//   2. With the right password, the streaming `frame_iter` /
+//      `decode_frame_at` / `frame_iter_from` paths produce
+//      bit-identical PCM to the eager `decode_with_password` baseline
+//      across a multi-frame format=2 stream. Random-access on a mid-
+//      stream frame must equal the matching slice of the eager
+//      decode (spec/02..05 §3.1 per-frame state reset + spec/07 §3.6
+//      qm re-prime at every frame).
+//   3. `Decoder::new_with_password` over a format=1 stream is a
+//      transparent alias for `Decoder::new`: the unused digest is
+//      dropped on construction (audit/07 §6.2-2) and the produced
+//      PCM is bit-identical to the format=1 streaming path.
+//   4. The constructor surfaces the same out-of-range error variants
+//      as the format=1 surface (FrameIndexOutOfRange,
+//      SampleIndexOutOfRange) for invalid random-access requests on
+//      format=2 streams.
+// ---------------------------------------------------------------
+
+#[test]
+fn new_with_password_format2_streaming_matches_eager_stereo_16bit() {
+    // Long enough to span ≥ 2 frames at 44.1 kHz so the multi-frame
+    // qm re-prime path is exercised by `frame_iter` (cf. round-5
+    // multi-frame format=2 trace coverage closing audit/07 §6.2-5:
+    // every frame init must reapply the digest priming).
+    // `regular_frame_samples = floor(44_100 * 256 / 245) = 46_073`
+    // per spec/01 §4.1, so 2.0 s × 44_100 = 88_200 → exactly two
+    // frames (one regular + one tail).
+    let n = (44_100.0 * 2.0) as usize;
+    let samples = pseudo_noise(n, 2, 0x7FFF, 0x5EED_DEAD_C0DE_F00D);
+    let password = b"correct horse battery staple";
+    let tta = encode_with_password(&samples, 2, 16, 44_100, password).expect("encode format=2");
+
+    let (info, eager) = decode_with_password(&tta, password).expect("eager decode_with_password");
+    assert_eq!(info.format, 2);
+
+    let dec =
+        crate::Decoder::new_with_password(&tta, password).expect("Decoder::new_with_password");
+    assert_eq!(dec.header.format, 2);
+    assert!(
+        dec.frames.len() >= 2,
+        "test wants ≥ 2 frames so the multi-frame qm re-prime path \
+         is exercised; got {}",
+        dec.frames.len()
+    );
+
+    // (a) frame_iter concatenates to the eager baseline.
+    let mut streaming = Vec::with_capacity(eager.len());
+    for r in dec.frame_iter() {
+        streaming.extend_from_slice(&r.expect("frame_iter decode"));
+    }
+    assert_eq!(
+        streaming, eager,
+        "frame_iter() PCM must equal decode_with_password() PCM bit-exactly \
+         on format=2"
+    );
+
+    // (b) decode_frame_at on every frame matches the eager slice.
+    let nch = info.channels as usize;
+    let mut cursor = 0usize;
+    for (i, fd) in dec.frames.iter().enumerate() {
+        let n_per_ch = fd.sample_count as usize;
+        let frame_pcm = dec.decode_frame_at(i).expect("decode_frame_at format=2");
+        let expected = &eager[cursor..cursor + n_per_ch * nch];
+        assert_eq!(
+            frame_pcm, expected,
+            "decode_frame_at({i}) on format=2 must match eager slice at cursor {cursor}"
+        );
+        cursor += n_per_ch * nch;
+    }
+
+    // (c) frame_iter_from(mid) produces the eager tail from that
+    //     sample boundary.
+    let start = 1usize.min(dec.frames.len().saturating_sub(1));
+    let preceding: usize = dec.frames[..start]
+        .iter()
+        .map(|f| f.sample_count as usize)
+        .sum();
+    let mut tail = Vec::new();
+    for r in dec.frame_iter_from(start) {
+        tail.extend_from_slice(&r.expect("frame_iter_from decode"));
+    }
+    assert_eq!(
+        tail,
+        eager[preceding * nch..],
+        "frame_iter_from(start) tail must match eager tail from the matching \
+         sample boundary on format=2"
+    );
+}
+
+#[test]
+fn new_with_password_seek_to_sample_format2_lands_in_right_frame() {
+    // ≥ 2 frames so the mid-stream + last-sample probes are not
+    // trivially frame-0.
+    let n = (44_100.0 * 2.5) as usize;
+    let samples = pseudo_noise(n, 2, 0x7FFF, 0x1234_5678_9ABC_DEF0);
+    let password = b"hunter2";
+    let tta = encode_with_password(&samples, 2, 16, 44_100, password).expect("encode format=2");
+
+    let dec =
+        crate::Decoder::new_with_password(&tta, password).expect("Decoder::new_with_password");
+    let regular = dec.header.regular_frame_samples() as u64;
+    assert!(regular > 0);
+    // Probe sample 0, mid-stream, last sample — same shape as the
+    // format=1 `seek_to_sample_lands_in_right_frame` test above.
+    for &target in &[0u64, (n as u64) / 2, (n as u64) - 1] {
+        let sp = dec.seek_to_sample(target).expect("seek_to_sample");
+        let frame_start = (sp.frame_index as u64) * regular;
+        let frame_end = frame_start + dec.frames[sp.frame_index].sample_count as u64;
+        assert!(
+            target >= frame_start && target < frame_end,
+            "format=2 target sample {target} fell outside frame {} [{frame_start}, {frame_end})",
+            sp.frame_index
+        );
+        assert_eq!(sp.sample_offset_in_frame as u64, target - frame_start);
+    }
+}
+
+#[test]
+fn new_with_password_format2_seek_and_resume_bit_exact() {
+    // Integration property mirroring the format=1
+    // `frame_iter_streaming_seek_and_resume_bit_exact` test: seek to
+    // sample S, decode via `frame_iter_from`, skip the in-frame
+    // prefix, compare against the eager tail. ≥ 2 frames so the
+    // sp.frame_index != 0 case actually fires.
+    let n = (44_100.0 * 2.5) as usize;
+    let samples = pseudo_noise(n, 2, 0x7FFF, 0xCAFE_F00D_BEEF_DEAD);
+    let password = b"correct horse battery staple";
+    let tta = encode_with_password(&samples, 2, 16, 44_100, password).expect("encode format=2");
+
+    let (info, eager) = decode_with_password(&tta, password).expect("eager");
+    let nch = info.channels as usize;
+
+    let dec =
+        crate::Decoder::new_with_password(&tta, password).expect("Decoder::new_with_password");
+    let target_sample = (n as u64) * 3 / 4;
+    let sp = dec.seek_to_sample(target_sample).expect("seek");
+
+    let mut got: Vec<i32> = Vec::new();
+    for (i_offset, r) in dec.frame_iter_from(sp.frame_index).enumerate() {
+        let i = sp.frame_index + i_offset;
+        let pcm = r.expect("decode frame");
+        if i == sp.frame_index {
+            let skip = sp.sample_offset_in_frame as usize * nch;
+            got.extend_from_slice(&pcm[skip..]);
+        } else {
+            got.extend_from_slice(&pcm);
+        }
+    }
+    let cursor = (target_sample as usize) * nch;
+    let expected_tail = &eager[cursor..];
+    assert_eq!(got.len(), expected_tail.len());
+    assert_eq!(
+        got, expected_tail,
+        "format=2 streaming-from-seek must produce bit-identical PCM to the eager tail"
+    );
+}
+
+#[test]
+fn new_with_password_format1_stream_drops_unused_priming() {
+    // A format=1 stream constructed via `Decoder::new_with_password`
+    // must decode bit-identically to `Decoder::new`: the priming is
+    // computed (for the open call) and then dropped per audit/07
+    // §6.2-2 / spec/02 §3.1 (format=1 qm zero-init invariant).
+    let samples = sine(8_192, 1, 44_100, 660.0, 12_000);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode format=1");
+
+    let dec_plain = crate::Decoder::new(&tta).expect("Decoder::new");
+    let dec_pw = crate::Decoder::new_with_password(&tta, b"unused-password")
+        .expect("Decoder::new_with_password on format=1");
+    assert_eq!(dec_plain.header.format, 1);
+    assert_eq!(dec_pw.header.format, 1);
+    assert_eq!(
+        dec_plain.decode_all().unwrap(),
+        dec_pw.decode_all().unwrap()
+    );
+
+    // The frame_iter path agrees with the eager decode_all on the
+    // password-constructed format=1 decoder too.
+    let mut streamed = Vec::new();
+    for r in dec_pw.frame_iter() {
+        streamed.extend_from_slice(&r.expect("frame"));
+    }
+    let eager_plain = dec_plain.decode_all().unwrap();
+    assert_eq!(streamed, eager_plain);
+}
+
+#[test]
+fn new_with_password_format2_wrong_password_decodes_but_corrupts() {
+    // spec/07 §11: format=2 has no MAC. A wrong password produces
+    // corrupt PCM but every per-frame CRC32 still validates (the CRC
+    // is taken over the encoded bitstream, not over post-Stage-A
+    // samples). The streaming constructor must therefore SUCCEED
+    // under a wrong password — no spurious `PasswordRequired` /
+    // `Crc32Mismatch` — and the resulting PCM shape must match the
+    // header (channels × total_samples) even though the values
+    // differ from the originals.
+    let n = (44_100.0 * 0.2) as usize;
+    let samples = pseudo_noise(n, 2, 0x7FFF, 0xABCD_EF01_2345_6789);
+    let right = b"right-password-AbCdEf";
+    let wrong = b"wrong-password-XyZ";
+    let tta = encode_with_password(&samples, 2, 16, 44_100, right).expect("encode format=2");
+
+    let dec_right =
+        crate::Decoder::new_with_password(&tta, right).expect("right password constructs");
+    let pcm_right: Vec<i32> = dec_right
+        .frame_iter()
+        .flat_map(|r| r.expect("frame"))
+        .collect();
+    // Correct round-trip with the right password.
+    assert_eq!(pcm_right, samples);
+
+    let dec_wrong = crate::Decoder::new_with_password(&tta, wrong)
+        .expect("wrong password must still construct");
+    let pcm_wrong: Vec<i32> = dec_wrong
+        .frame_iter()
+        .flat_map(|r| r.expect("frame must still decode under wrong password"))
+        .collect();
+    // Same shape (header is plaintext per spec/07 §2) but values
+    // differ — exactly the spec/07 §11 "no MAC, garbage PCM"
+    // behaviour. We do not require *any* particular divergence
+    // pattern, only that the dimensions match and that wrong !=
+    // right (the digest XOR-folds into qm at every frame, so for
+    // non-trivial PCM the two outputs are essentially always
+    // distinct).
+    assert_eq!(pcm_wrong.len(), pcm_right.len());
+    assert_ne!(
+        pcm_wrong, pcm_right,
+        "wrong-password decode should produce different PCM to the right-password decode \
+         (spec/07 §11 no MAC, garbage-out)"
+    );
+}
+
+#[test]
+fn new_with_password_format2_out_of_range_index_errors() {
+    let samples = sine(4_096, 1, 44_100, 440.0, 12_000);
+    let password = b"x";
+    let tta = encode_with_password(&samples, 1, 16, 44_100, password).expect("encode format=2");
+    let dec =
+        crate::Decoder::new_with_password(&tta, password).expect("Decoder::new_with_password");
+    let last = dec.frames.len();
+    assert_eq!(
+        dec.decode_frame_at(last),
+        Err(crate::Error::FrameIndexOutOfRange)
+    );
+    let total = dec.header.total_samples as u64;
+    assert_eq!(
+        dec.seek_to_sample(total),
+        Err(crate::Error::SampleIndexOutOfRange)
+    );
+}

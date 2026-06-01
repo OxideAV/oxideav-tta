@@ -5,9 +5,11 @@ Pure-Rust True Audio (TTA) lossless audio codec for the
 
 ## Status
 
-**Round 5 — clean-room encoder + decoder + framework integration +
-trace tape + format=2 + ID3v1/APEv2 trailer detection + multi-frame
-format=2 trace coverage.** Both encodes and decodes TTA1 format=1
+**Round 5 (+ r187 streaming surface, r204 format=2 streaming reach)
+— clean-room encoder + decoder + framework integration + trace tape
++ format=2 + ID3v1/APEv2 trailer detection + multi-frame format=2
+trace coverage + format=2 streaming/random-access surface.** Both
+encodes and decodes TTA1 format=1
 (integer PCM) and format=2 (password-derived qm priming, `spec/07`)
 streams in pure safe Rust against the strict-isolation clean-room
 workspace at
@@ -25,6 +27,19 @@ agreement with `decode_all` is locked by tests for both
 single-frame and full streaming-from-seek paths — the per-frame
 state-reset discipline of `spec/01` §5.1 + `spec/02..05` §3.1 is
 what makes random-access decode legitimate against the spec.
+
+Round 204 extends that surface to format=2 (password-protected,
+`spec/07`) streams via the new public
+`Decoder::new_with_password(bytes, password)` constructor. With it,
+the same `frame_iter` / `decode_frame_at` / `seek_to_sample` /
+`frame_iter_from` API is reachable across format=2 streams under
+identical per-frame qm re-prime discipline (`spec/07` §3.5–§3.6) —
+six new tests in `roundtrip_tests` lock bit-exact agreement with the
+eager `decode_with_password` baseline on multi-frame stereo16, the
+seek-and-resume integration path on format=2, the format=1
+fall-through (priming computed then dropped per audit/07 §6.2-2), the
+spec/07 §11 "wrong-password decodes but corrupts" semantic, and the
+`FrameIndexOutOfRange` / `SampleIndexOutOfRange` rejection shape.
 
 The fresh orphan `master` is the starting point; the previous
 implementation, retired alongside the OxideAV docs audit dated
@@ -328,11 +343,22 @@ warmup): `streaming_frame_iter_cube/mono16_44k1_1s` ≈ 566 µs
 `…/ch6_16bit_48k_250ms` ≈ 974 µs (~141 MiB/s);
 `streaming_decode_frame_at_cube/mono16_44k1_1s` ≈ 561 µs
 (~150 MiB/s), `…/stereo24_48k_500ms` ≈ 600 µs (~229 MiB/s),
-`…/ch6_16bit_48k_250ms` ≈ 960 µs (~143 MiB/s). Format=2 is
-intentionally omitted from these cube groups — the current public
-streaming surface (`Decoder::new` → `frame_iter` /
-`decode_frame_at`) is format=1 only; the format=2 path goes through
-the eager [`decode_with_password`](src/lib.rs), which is already
-benchmarked by `decode.rs::decode_stereo_16bit_44k1_format2_1s`.
+`…/ch6_16bit_48k_250ms` ≈ 960 µs (~143 MiB/s).
+
+Round 204 closes the r198 cube's format=2 omission by adding a
+`stereo16_44k1_1s_format2` cell to both `streaming_frame_iter_cube`
+and `streaming_decode_frame_at_cube`. The cell uses the new
+`Decoder::new_with_password` constructor at the same parameter point
+as the format=1 anchor (`stereo16` × `16-bit` × `44.1 kHz` × `1 s`),
+so the marginal cost of the per-frame qm re-prime
+(`spec/07` §3.5–§3.6) is directly comparable against the format=1
+baseline. Reference numbers on the development machine (`--bench
+--quick`): `streaming_frame_iter_cube/stereo16_44k1_1s_format2`
+≈ 1.22 ms (~138 MiB/s),
+`streaming_decode_frame_at_cube/stereo16_44k1_1s_format2`
+≈ 1.20 ms (~140 MiB/s) — the format=2 cells land essentially within
+noise of the format=1 sibling at the same shape, confirming the
+per-frame qm priming write is negligible against the Rice + Stage-A
+LMS + Stage-B + decorr cascade cost.
 
 Run locally with `cargo bench -p oxideav-tta --bench <decode|encode|roundtrip|streaming>`.
