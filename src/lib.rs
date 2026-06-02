@@ -96,7 +96,7 @@ mod tables;
 mod trace;
 mod trailers;
 
-pub use crate::decoder::{decode_frame, Decoder, FrameIter, SeekPoint};
+pub use crate::decoder::{decode_frame, Decoder, FrameIter, SampleSkipIter, SeekPoint};
 pub use crate::encoder::{encode, encode_with_password};
 pub use crate::error::{Error, Result};
 pub use crate::header::{FrameDescriptor, StreamHeader};

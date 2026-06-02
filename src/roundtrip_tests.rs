@@ -17,10 +17,10 @@
 //!
 //! What this does NOT verify (deferred to Auditor):
 //!
-//! - Bit-exact agreement with libtta's encoded output. That requires
-//!   either a libtta-encoded fixture (forbidden input under the wall)
-//!   or a checked-in reference fixture (currently absent from the
-//!   workspace).
+//! - Bit-exact agreement with a reference-encoder-produced TTA1 byte
+//!   stream. That requires either a reference-encoded fixture (forbidden
+//!   input under the clean-room wall) or a checked-in conformance
+//!   fixture (currently absent from the workspace).
 
 use crate::{decode, decode_with_password, encode, encode_with_password, pack_pcm};
 
@@ -1254,4 +1254,259 @@ fn new_with_password_format2_out_of_range_index_errors() {
         dec.seek_to_sample(total),
         Err(crate::Error::SampleIndexOutOfRange)
     );
+}
+
+// ---------------------------------------------------------------
+// Round 209 — player-API sugar:
+//
+//   Decoder::frame_iter_from_sample(sample_index)
+//   Decoder::decode_from_sample(sample_index)
+//
+// Combine `seek_to_sample` + `frame_iter_from` + the in-frame prefix
+// skip into a single call. The tests pin three invariants against the
+// existing eager `decode_all` baseline:
+//
+//   1. `decode_from_sample(s)` equals `decode_all()[s * channels..]`
+//      bit-exactly across the parameter cube (format=1 mono16,
+//      stereo16, stereo24, 6ch16, plus format=2 stereo16).
+//   2. `frame_iter_from_sample(s)` chained `.concat()` equals the
+//      same tail, and yields the same per-frame structure as
+//      `frame_iter_from(seek.frame_index)` with the inner skip
+//      removed.
+//   3. Rejection shape: `sample_index >= total_samples` returns
+//      `SampleIndexOutOfRange` from both APIs. The boundary case
+//      `total_samples - 1` succeeds and returns exactly `channels`
+//      interleaved entries.
+// ---------------------------------------------------------------
+
+#[test]
+fn decode_from_sample_matches_eager_tail_mono16_format1() {
+    let samples = pseudo_noise(2 * 44_100, 1, 0x7FFF, 0x0C0F_FEE5);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let eager = dec.decode_all().expect("decode_all");
+    let nch = dec.header.channels as usize;
+
+    for &target in &[0u64, 100, 23_000, 70_000, (eager.len() / nch) as u64 - 1] {
+        let got = dec.decode_from_sample(target).expect("decode_from_sample");
+        let cursor = (target as usize) * nch;
+        let expected = &eager[cursor..];
+        assert_eq!(
+            got.len(),
+            expected.len(),
+            "decode_from_sample({target}) length must match eager tail"
+        );
+        assert_eq!(
+            got, expected,
+            "decode_from_sample({target}) must equal eager decode tail bit-exactly"
+        );
+    }
+}
+
+#[test]
+fn decode_from_sample_matches_eager_tail_stereo16_format1() {
+    let samples = pseudo_noise(2 * 44_100, 2, 0x7FFF, 0xD00D_BEEF);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let eager = dec.decode_all().expect("decode_all");
+    let nch = dec.header.channels as usize;
+    let total = dec.header.total_samples as u64;
+
+    for &target in &[0u64, total / 4, total / 2, total * 3 / 4, total - 1] {
+        let got = dec.decode_from_sample(target).expect("decode_from_sample");
+        let cursor = (target as usize) * nch;
+        assert_eq!(got, eager[cursor..]);
+    }
+}
+
+#[test]
+fn decode_from_sample_matches_eager_tail_stereo24_format1() {
+    let samples = pseudo_noise(44_100, 2, 0x7F_FFFF, 0xFADE_FEED);
+    let tta = encode(&samples, 2, 24, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let eager = dec.decode_all().expect("decode_all");
+    let nch = dec.header.channels as usize;
+    let total = dec.header.total_samples as u64;
+
+    for &target in &[1u64, total / 3, total - 1] {
+        let got = dec.decode_from_sample(target).expect("decode_from_sample");
+        let cursor = (target as usize) * nch;
+        assert_eq!(got, eager[cursor..]);
+    }
+}
+
+#[test]
+fn decode_from_sample_matches_eager_tail_6ch16_format1() {
+    let samples = pseudo_noise(20_000, 6, 0x7FFF, 0xBAAA_AAAD);
+    let tta = encode(&samples, 6, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let eager = dec.decode_all().expect("decode_all");
+    let nch = dec.header.channels as usize;
+    let total = dec.header.total_samples as u64;
+
+    for &target in &[0u64, total / 5, total - 1] {
+        let got = dec.decode_from_sample(target).expect("decode_from_sample");
+        let cursor = (target as usize) * nch;
+        assert_eq!(got, eager[cursor..]);
+    }
+}
+
+#[test]
+fn decode_from_sample_matches_eager_tail_stereo16_format2() {
+    let samples = pseudo_noise(44_100, 2, 0x7FFF, 0xACE_2026);
+    let password = b"the-r209-target";
+    let tta =
+        encode_with_password(&samples, 2, 16, 44_100, password).expect("encode_with_password");
+    let dec =
+        crate::Decoder::new_with_password(&tta, password).expect("Decoder::new_with_password");
+    let eager = dec.decode_all().expect("decode_all");
+    let nch = dec.header.channels as usize;
+    let total = dec.header.total_samples as u64;
+
+    for &target in &[0u64, total / 4, total / 2, total - 1] {
+        let got = dec.decode_from_sample(target).expect("decode_from_sample");
+        let cursor = (target as usize) * nch;
+        assert_eq!(got, eager[cursor..]);
+    }
+}
+
+#[test]
+fn frame_iter_from_sample_concat_matches_eager_tail() {
+    // The iterator path: collect every frame's PCM and verify the
+    // concatenation equals the eager tail. Also pin that the
+    // per-frame structure preserves what `frame_iter_from` would
+    // have yielded (minus the in-frame skip).
+    let samples = pseudo_noise(2 * 44_100, 2, 0x7FFF, 0x600D_F00D);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let eager = dec.decode_all().expect("decode_all");
+    let nch = dec.header.channels as usize;
+
+    let target_sample = (eager.len() / nch) as u64 * 3 / 4;
+    let cursor = (target_sample as usize) * nch;
+    let expected_tail = &eager[cursor..];
+
+    let mut got: Vec<i32> = Vec::new();
+    let mut emitted_frames = 0usize;
+    for r in dec
+        .frame_iter_from_sample(target_sample)
+        .expect("frame_iter_from_sample")
+    {
+        let pcm = r.expect("frame decode");
+        got.extend_from_slice(&pcm);
+        emitted_frames += 1;
+    }
+    assert!(
+        emitted_frames >= 1,
+        "frame_iter_from_sample must yield at least one frame"
+    );
+    assert_eq!(got.len(), expected_tail.len());
+    assert_eq!(got, expected_tail);
+
+    // Cross-check: the inner `frame_iter_from(sp.frame_index)` with
+    // the manual skip must produce the same bytes. This pins that
+    // the new API is *exactly* sugar over the existing combinators —
+    // no semantic drift.
+    let sp = dec.seek_to_sample(target_sample).expect("seek");
+    let mut by_hand: Vec<i32> = Vec::new();
+    for (offset, r) in dec.frame_iter_from(sp.frame_index).enumerate() {
+        let pcm = r.expect("manual decode");
+        if offset == 0 {
+            by_hand.extend_from_slice(&pcm[sp.sample_offset_in_frame as usize * nch..]);
+        } else {
+            by_hand.extend_from_slice(&pcm);
+        }
+    }
+    assert_eq!(
+        by_hand, got,
+        "frame_iter_from_sample must equal the by-hand seek_to_sample + \
+         frame_iter_from + skip composition"
+    );
+}
+
+#[test]
+fn frame_iter_from_sample_zero_equals_full_decode() {
+    // Boundary: sample_index == 0 must be equivalent to a full
+    // `frame_iter` decode with no leading skip applied.
+    let samples = pseudo_noise(3 * 44_100 / 2, 2, 0x7FFF, 0xBAD_F00D);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let eager = dec.decode_all().expect("decode_all");
+
+    let mut got: Vec<i32> = Vec::new();
+    for r in dec
+        .frame_iter_from_sample(0)
+        .expect("frame_iter_from_sample(0)")
+    {
+        got.extend_from_slice(&r.expect("decode"));
+    }
+    assert_eq!(got, eager);
+}
+
+#[test]
+fn decode_from_sample_last_sample_returns_one_frame_of_one_sample() {
+    // Boundary: sample_index = total_samples - 1 must succeed and
+    // yield exactly `channels` interleaved entries (one per-channel
+    // sample at the very end).
+    let samples = pseudo_noise(44_100, 2, 0x7FFF, 0x00DE_ADBE_EF22);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let total = dec.header.total_samples as u64;
+    let nch = dec.header.channels as usize;
+
+    let got = dec
+        .decode_from_sample(total - 1)
+        .expect("decode_from_sample(total-1)");
+    assert_eq!(got.len(), nch, "must return exactly `channels` entries");
+
+    let eager = dec.decode_all().expect("decode_all");
+    assert_eq!(&got[..], &eager[eager.len() - nch..]);
+}
+
+#[test]
+fn decode_from_sample_rejects_out_of_range() {
+    let samples = sine(4_096, 1, 44_100, 440.0, 12_000);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let total = dec.header.total_samples as u64;
+
+    assert_eq!(
+        dec.decode_from_sample(total),
+        Err(crate::Error::SampleIndexOutOfRange)
+    );
+    assert_eq!(
+        dec.decode_from_sample(total + 1),
+        Err(crate::Error::SampleIndexOutOfRange)
+    );
+    assert!(dec.frame_iter_from_sample(total).is_err());
+    assert!(dec.frame_iter_from_sample(u64::MAX).is_err());
+}
+
+#[test]
+fn frame_iter_from_sample_format2_seek_and_resume_bit_exact() {
+    // Format=2 (password-protected) equivalent of
+    // `frame_iter_from_sample_concat_matches_eager_tail`. The
+    // per-frame qm re-prime discipline of `spec/07` §3.5–§3.6 makes
+    // mid-stream resume bit-exact against the eager
+    // `decode_with_password` baseline.
+    let samples = pseudo_noise(2 * 44_100, 2, 0x7FFF, 0xACE_F00D);
+    let password = b"f2-frame-iter-from-sample";
+    let tta = encode_with_password(&samples, 2, 16, 44_100, password).expect("encode format=2");
+    let dec =
+        crate::Decoder::new_with_password(&tta, password).expect("Decoder::new_with_password");
+    let eager = dec.decode_all().expect("decode_all");
+    let nch = dec.header.channels as usize;
+
+    let target_sample = (eager.len() / nch) as u64 / 2;
+    let cursor = (target_sample as usize) * nch;
+    let expected_tail = &eager[cursor..];
+
+    let mut got: Vec<i32> = Vec::new();
+    for r in dec
+        .frame_iter_from_sample(target_sample)
+        .expect("frame_iter_from_sample (format=2)")
+    {
+        got.extend_from_slice(&r.expect("frame decode"));
+    }
+    assert_eq!(got, expected_tail);
 }

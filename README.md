@@ -5,10 +5,12 @@ Pure-Rust True Audio (TTA) lossless audio codec for the
 
 ## Status
 
-**Round 5 (+ r187 streaming surface, r204 format=2 streaming reach)
-— clean-room encoder + decoder + framework integration + trace tape
-+ format=2 + ID3v1/APEv2 trailer detection + multi-frame format=2
-trace coverage + format=2 streaming/random-access surface.** Both
+**Round 5 (+ r187 streaming surface, r204 format=2 streaming reach,
+r209 sample-keyed player-API sugar) — clean-room encoder + decoder +
+framework integration + trace tape + format=2 + ID3v1/APEv2 trailer
+detection + multi-frame format=2 trace coverage + format=2
+streaming/random-access surface + `decode_from_sample` /
+`frame_iter_from_sample`.** Both
 encodes and decodes TTA1 format=1
 (integer PCM) and format=2 (password-derived qm priming, `spec/07`)
 streams in pure safe Rust against the strict-isolation clean-room
@@ -40,6 +42,23 @@ seek-and-resume integration path on format=2, the format=1
 fall-through (priming computed then dropped per audit/07 §6.2-2), the
 spec/07 §11 "wrong-password decodes but corrupts" semantic, and the
 `FrameIndexOutOfRange` / `SampleIndexOutOfRange` rejection shape.
+
+Round 209 layers a player-API convenience pair on top of the same
+streaming surface: `Decoder::decode_from_sample(sample_index)`
+materialises the suffix of `decode_all` starting at the requested
+per-channel sample boundary, and
+`Decoder::frame_iter_from_sample(sample_index)` returns a
+trace-silent `SampleSkipIter` that yields the same suffix one frame
+at a time. Both calls combine the previously-manual
+`seek_to_sample(s) → frame_iter_from(sp.frame_index) → drain the
+sp.sample_offset_in_frame × channels prefix` ritual into a single
+entry point. Ten new tests in `roundtrip_tests` pin bit-exact
+agreement with `decode_all`'s tail across the parameter cube (mono16
+/ stereo16 / stereo24 / 6ch16 in format=1, stereo16 in format=2),
+the inner equivalence to the by-hand composition, the
+`sample_index = 0` round-trip, the `total_samples - 1` boundary
+returning exactly `channels` entries, and the
+`SampleIndexOutOfRange` rejection shape on both APIs.
 
 The fresh orphan `master` is the starting point; the previous
 implementation, retired alongside the OxideAV docs audit dated

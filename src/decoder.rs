@@ -521,6 +521,63 @@ impl<'a> Decoder<'a> {
         })
     }
 
+    /// Player-API sugar: combine [`Decoder::seek_to_sample`] with
+    /// [`Decoder::frame_iter_from`] and the in-frame prefix skip into a
+    /// single iterator that yields interleaved `i32` PCM samples
+    /// starting **at** `sample_index` (zero-based, per-channel).
+    ///
+    /// The first frame yielded by the inner iterator is decoded in
+    /// full, then its leading `sample_offset_in_frame * channels`
+    /// interleaved entries are discarded before the trimmed buffer is
+    /// returned. Every subsequent frame is yielded verbatim. The
+    /// concatenation of every yielded `Vec<i32>` equals the suffix of
+    /// `Decoder::decode_all` starting at `sample_index * channels`.
+    ///
+    /// The per-frame state-reset discipline of `spec/01` §5.1 +
+    /// `spec/02..05` §3.1 is what makes the in-frame skip legitimate:
+    /// every frame seeds its Rice / Stage-A / Stage-B trackers from
+    /// zero (or the format=2 `qm` priming digest), so the only price
+    /// of resuming mid-frame is the per-channel decoded prefix we
+    /// throw away — not a tracker-state recovery walk.
+    ///
+    /// Returns [`Error::SampleIndexOutOfRange`] when `sample_index >=
+    /// header.total_samples`. The iterator itself is trace-silent
+    /// (same property as [`Decoder::frame_iter`] / `frame_iter_from`).
+    pub fn frame_iter_from_sample(&self, sample_index: u64) -> Result<SampleSkipIter<'_, 'a>> {
+        let seek = self.seek_to_sample(sample_index)?;
+        let inner = self.frame_iter_from(seek.frame_index);
+        let skip = (seek.sample_offset_in_frame as usize) * (self.header.channels as usize);
+        Ok(SampleSkipIter {
+            inner,
+            prefix_to_skip: skip,
+        })
+    }
+
+    /// Player-API sugar: combine [`Decoder::frame_iter_from_sample`]
+    /// with eager materialisation. Returns the interleaved `i32` PCM
+    /// tail of the stream starting **at** `sample_index` (zero-based,
+    /// per-channel); equivalent to
+    /// `decode_all()[sample_index * channels..]` but without paying
+    /// for the discarded prefix.
+    ///
+    /// Returns [`Error::SampleIndexOutOfRange`] when `sample_index >=
+    /// header.total_samples`. Any bitstream-level error encountered
+    /// while decoding the tail short-circuits as
+    /// `Err(Error::…)`.
+    pub fn decode_from_sample(&self, sample_index: u64) -> Result<Vec<i32>> {
+        let iter = self.frame_iter_from_sample(sample_index)?;
+        let total = self.header.total_samples as u64;
+        let channels = self.header.channels as usize;
+        // Suffix length in interleaved entries = (total - sample_index) * channels.
+        // The seek_to_sample bound check already guaranteed sample_index < total.
+        let suffix_entries = ((total - sample_index) as usize).saturating_mul(channels);
+        let mut out = Vec::with_capacity(suffix_entries);
+        for frame in iter {
+            out.extend_from_slice(&frame?);
+        }
+        Ok(out)
+    }
+
     /// Emit the §5.1 container-level events plus the §5.2 per-channel
     /// init events to the trace tape, in the order required by §7.1
     /// and §7.2.
@@ -632,3 +689,70 @@ impl<'d, 'a> Iterator for FrameIter<'d, 'a> {
 }
 
 impl<'d, 'a> ExactSizeIterator for FrameIter<'d, 'a> {}
+
+/// Lazy frame-by-frame decoder iterator returned by
+/// [`Decoder::frame_iter_from_sample`].
+///
+/// Wraps an inner [`FrameIter`] (positioned at the frame containing the
+/// requested per-channel `sample_index`) and trims the leading
+/// `sample_offset_in_frame * channels` interleaved entries off the
+/// **first** yielded frame so the iterator's output begins exactly at
+/// the requested sample boundary. Every subsequent frame is forwarded
+/// verbatim.
+///
+/// The trim runs once, at first `next()`. If the first decoded frame
+/// produces fewer interleaved entries than the requested prefix (an
+/// impossible case under [`Decoder::seek_to_sample`]'s `< regular`
+/// invariant, but defensive against hand-crafted seek tables), the
+/// trim saturates and the yielded buffer is empty for that frame; the
+/// next frame onward is forwarded normally.
+///
+/// Like the underlying [`FrameIter`], this iterator is trace-silent
+/// and stops yielding once every frame in the seek table has been
+/// consumed.
+pub struct SampleSkipIter<'d, 'a> {
+    inner: FrameIter<'d, 'a>,
+    /// Number of leading interleaved `i32` entries to discard from the
+    /// next decoded frame's PCM buffer. Cleared after the first
+    /// non-empty trim.
+    prefix_to_skip: usize,
+}
+
+impl<'d, 'a> Iterator for SampleSkipIter<'d, 'a> {
+    type Item = Result<Vec<i32>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let nxt = self.inner.next()?;
+        if self.prefix_to_skip == 0 {
+            return Some(nxt);
+        }
+        match nxt {
+            Ok(mut pcm) => {
+                let skip = self.prefix_to_skip.min(pcm.len());
+                self.prefix_to_skip = 0;
+                if skip == 0 {
+                    Some(Ok(pcm))
+                } else {
+                    // Drain the leading `skip` interleaved entries.
+                    // `drain(..skip)` is O(skip + tail copy); for the
+                    // expected sub-frame skip sizes (max ~46 073 ×
+                    // channels) the tail copy is cheap relative to the
+                    // already-paid decode cost.
+                    pcm.drain(..skip);
+                    Some(Ok(pcm))
+                }
+            }
+            Err(e) => {
+                // Surface the error and let inner short-circuit.
+                self.prefix_to_skip = 0;
+                Some(Err(e))
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<'d, 'a> ExactSizeIterator for SampleSkipIter<'d, 'a> {}

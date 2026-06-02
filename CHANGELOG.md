@@ -8,6 +8,50 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-209: public `Decoder::decode_from_sample(sample_index)` and
+  `Decoder::frame_iter_from_sample(sample_index)` — player-API sugar
+  that combines the round-187 `seek_to_sample` + `frame_iter_from`
+  pair with the in-frame prefix skip into a single entry point.
+  `decode_from_sample(s)` eagerly returns the suffix of `decode_all`
+  starting at the per-channel sample boundary `s` (length
+  `(total_samples - s) * channels`); `frame_iter_from_sample(s)`
+  returns a trace-silent `SampleSkipIter` that lazily yields the
+  same suffix one frame at a time, with the leading
+  `sp.sample_offset_in_frame × channels` entries trimmed from the
+  first decoded frame. Both reuse the existing
+  `seek_to_sample` arithmetic verbatim (per `spec/01` §4.1) and
+  inherit the per-frame state-reset discipline of `spec/01` §5.1 +
+  `spec/02..05` §3.1 that makes mid-stream resume bit-exact against
+  the eager baseline. Format=1 and format=2 (password-protected) are
+  both reachable. Ten new tests in `roundtrip_tests` lock the
+  invariants:
+  - `decode_from_sample_matches_eager_tail_*` (5 cells: mono16 /
+    stereo16 / stereo24 / 6ch16 in format=1, stereo16 in format=2):
+    `decode_from_sample(s)` equals `decode_all()[s × channels..]`
+    bit-exactly at multiple `s` per cell (start, multiple
+    fractions, `total_samples - 1`).
+  - `frame_iter_from_sample_concat_matches_eager_tail`: the lazy
+    iterator's concatenation equals the eager tail AND equals the
+    by-hand `seek_to_sample + frame_iter_from + manual skip`
+    composition (pinning that the new API is exactly sugar — no
+    semantic drift).
+  - `frame_iter_from_sample_zero_equals_full_decode`: boundary
+    `s = 0` round-trips via the iterator to the full
+    `decode_all` output.
+  - `decode_from_sample_last_sample_returns_one_frame_of_one_sample`:
+    boundary `s = total_samples - 1` returns exactly `channels`
+    interleaved entries (one per-channel sample at the very end).
+  - `decode_from_sample_rejects_out_of_range`: `s >= total_samples`
+    surfaces `Error::SampleIndexOutOfRange` from both APIs (and
+    `u64::MAX` does not panic).
+  - `frame_iter_from_sample_format2_seek_and_resume_bit_exact`:
+    format=2 (password-protected) lazy seek-and-resume matches the
+    eager `decode_with_password` tail bit-exactly, verifying the
+    per-frame qm re-prime discipline of `spec/07` §3.5–§3.6
+    propagates through the new iterator unchanged.
+  Pre-existing test count: 100 lib + 9 integration; r209 adds 10
+  lib tests, total 110 + 9.
+
 - Round-204: public `Decoder::new_with_password(bytes, password)`
   constructor that brings the round-187 streaming + random-access
   decode surface (`frame_iter`, `decode_frame_at`, `seek_to_sample`,
@@ -96,6 +140,18 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inputs reuse the existing in-bench `build_pcm` helper (xorshift32
   envelope + per-sample noise) so the workload is identical to the
   other three benches; no checked-in fixtures.
+
+### Changed
+
+- Round-209: paraphrased the pre-existing reference-encoder oracle
+  attribution in `src/roundtrip_tests.rs` (module-level docstring
+  lines 18–22, "What this does NOT verify (deferred to Auditor)"
+  block) to neutral wording. The deferred-verification semantics
+  are unchanged — the clean-room wall still bars reference-encoder
+  source as an input — but the cited tool name has been replaced
+  with a description of its role ("reference-encoder-produced TTA1
+  byte stream", "reference-encoded fixture") so the prose no longer
+  carries the third-party-implementation identifier.
 
 ## [0.0.2](https://github.com/OxideAV/oxideav-tta/compare/v0.0.1...v0.0.2) - 2026-05-30
 
