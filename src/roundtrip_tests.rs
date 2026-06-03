@@ -1742,3 +1742,469 @@ fn seek_to_time_sub_sample_period_resolves_to_same_sample() {
     assert_eq!(next_sp, cross_sp);
     assert_ne!(next_sp, at_boundary_sp);
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Round 219 — half-open `[start, end)` sample/time-range player-API
+// quartet on Decoder:
+//
+//   Decoder::decode_sample_range(start, end)
+//   Decoder::frame_iter_sample_range(start, end)
+//   Decoder::decode_time_range(start, end)
+//   Decoder::frame_iter_time_range(start, end)
+//
+// Invariants to lock:
+//
+//   1. `decode_sample_range(start, end)` equals `decode_all()[start*nch
+//      .. end*nch]` bit-exactly across the parameter cube (mono16 /
+//      stereo16 / stereo24 / 6ch16 / format=2 stereo16).
+//   2. `decode_sample_range(s, total_samples)` equals `decode_from_sample(s)`
+//      — the half-open end at `total_samples` collapses to the
+//      sample-keyed tail surface.
+//   3. `decode_sample_range(0, total_samples)` equals `decode_all()`.
+//   4. `decode_sample_range(s, s) == Ok(vec![])` for every `s` in
+//      `[0, total_samples]` (including the boundary `s == total_samples`).
+//   5. `frame_iter_sample_range(s, e)` chained `.concat()` equals
+//      `decode_sample_range(s, e)`.
+//   6. Trailing-frame trim: when `end` lands mid-frame, the final
+//      yielded frame's interleaved entry count matches the in-frame
+//      sample offset, not the full regular-frame width.
+//   7. `decode_time_range(start, end)` matches `decode_sample_range`
+//      at the duration_to_sample_index conversion of both endpoints.
+//   8. Out-of-range rejection: `end > total_samples` →
+//      `SampleIndexOutOfRange`; `start > end` →
+//      `SampleIndexOutOfRange`.
+//
+// All tests use the crate's own production encoder to build a TTA1
+// stream, decode eagerly to obtain the expected PCM, and compare the
+// range-API output against the eager slice.
+// ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn decode_sample_range_matches_eager_slice_mono16_format1() {
+    let samples = pseudo_noise(2 * 44_100, 1, 0x7FFF, 0x0219_C0DE_F00D_BEEF);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let eager = dec.decode_all().expect("decode_all");
+    let nch = dec.header.channels as usize;
+    let total = dec.header.total_samples as u64;
+
+    for &(start, end) in &[
+        (0u64, total),
+        (0, total / 2),
+        (total / 4, total * 3 / 4),
+        (100, 200),
+        (total - 1, total),
+        (total, total), // empty range at the boundary
+        (0, 0),         // empty range at the start
+    ] {
+        let got = dec
+            .decode_sample_range(start, end)
+            .expect("decode_sample_range");
+        let expected = &eager[(start as usize) * nch..(end as usize) * nch];
+        assert_eq!(
+            got.len(),
+            expected.len(),
+            "decode_sample_range({start},{end}) length mismatch"
+        );
+        assert_eq!(
+            got, expected,
+            "decode_sample_range({start},{end}) must equal eager slice bit-exactly"
+        );
+    }
+}
+
+#[test]
+fn decode_sample_range_matches_eager_slice_stereo16_format1() {
+    let samples = pseudo_noise(2 * 44_100, 2, 0x7FFF, 0x0219_DEAD_BEEF_CAFE);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let eager = dec.decode_all().expect("decode_all");
+    let nch = dec.header.channels as usize;
+    let total = dec.header.total_samples as u64;
+
+    for &(start, end) in &[
+        (0u64, total),
+        (total / 4, total / 2),
+        (total / 2, total),
+        (1, total - 1),
+    ] {
+        let got = dec
+            .decode_sample_range(start, end)
+            .expect("decode_sample_range");
+        let expected = &eager[(start as usize) * nch..(end as usize) * nch];
+        assert_eq!(got, expected);
+    }
+}
+
+#[test]
+fn decode_sample_range_matches_eager_slice_stereo24_format1() {
+    let samples = pseudo_noise(44_100, 2, 0x7F_FFFF, 0x0219_FADE_BAAD_F00D);
+    let tta = encode(&samples, 2, 24, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let eager = dec.decode_all().expect("decode_all");
+    let nch = dec.header.channels as usize;
+    let total = dec.header.total_samples as u64;
+
+    for &(start, end) in &[(0u64, total), (100, total - 100), (total / 3, total / 2)] {
+        let got = dec
+            .decode_sample_range(start, end)
+            .expect("decode_sample_range");
+        let expected = &eager[(start as usize) * nch..(end as usize) * nch];
+        assert_eq!(got, expected);
+    }
+}
+
+#[test]
+fn decode_sample_range_matches_eager_slice_6ch16_format1() {
+    let samples = pseudo_noise(20_000, 6, 0x7FFF, 0x0219_BAAA_AAAD_FACE);
+    let tta = encode(&samples, 6, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let eager = dec.decode_all().expect("decode_all");
+    let nch = dec.header.channels as usize;
+    let total = dec.header.total_samples as u64;
+
+    for &(start, end) in &[
+        (0u64, total),
+        (500, total - 500),
+        (total / 4, total * 3 / 4),
+    ] {
+        let got = dec
+            .decode_sample_range(start, end)
+            .expect("decode_sample_range");
+        let expected = &eager[(start as usize) * nch..(end as usize) * nch];
+        assert_eq!(got, expected);
+    }
+}
+
+#[test]
+fn decode_sample_range_matches_eager_slice_format2_password_stereo16() {
+    let samples = pseudo_noise(44_100, 2, 0x7FFF, 0x0219_E2E2_2026);
+    let password = b"the-r219-range-target";
+    let tta =
+        encode_with_password(&samples, 2, 16, 44_100, password).expect("encode_with_password");
+    let dec =
+        crate::Decoder::new_with_password(&tta, password).expect("Decoder::new_with_password");
+    let eager = dec.decode_all().expect("decode_all");
+    let nch = dec.header.channels as usize;
+    let total = dec.header.total_samples as u64;
+
+    for &(start, end) in &[(0u64, total), (total / 4, total * 3 / 4), (1, total - 1)] {
+        let got = dec
+            .decode_sample_range(start, end)
+            .expect("decode_sample_range");
+        let expected = &eager[(start as usize) * nch..(end as usize) * nch];
+        assert_eq!(got, expected, "format=2 range mismatch for ({start},{end})");
+    }
+}
+
+#[test]
+fn decode_sample_range_full_stream_equals_decode_all() {
+    // The (0, total) range must reproduce decode_all() exactly across
+    // a multi-frame stream — locks the "no frames missing at the
+    // boundary" invariant for the trim path.
+    let samples = pseudo_noise(3 * 44_100, 2, 0x7FFF, 0x0219_F011_5774_2001);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let eager = dec.decode_all().expect("decode_all");
+    let total = dec.header.total_samples as u64;
+
+    let full = dec
+        .decode_sample_range(0, total)
+        .expect("decode_sample_range(0, total)");
+    assert_eq!(full, eager);
+}
+
+#[test]
+fn decode_sample_range_to_total_equals_decode_from_sample() {
+    // For every start, `decode_sample_range(start, total_samples)`
+    // must equal `decode_from_sample(start)` — the half-open end at
+    // `total_samples` collapses to the previously-shipped tail
+    // surface.
+    let samples = pseudo_noise(2 * 44_100, 2, 0x7FFF, 0x0219_77A1_7070_7070);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let total = dec.header.total_samples as u64;
+
+    for &start in &[0u64, 1, total / 3, total / 2, total * 2 / 3, total - 1] {
+        let range = dec
+            .decode_sample_range(start, total)
+            .expect("decode_sample_range(start, total)");
+        let tail = dec
+            .decode_from_sample(start)
+            .expect("decode_from_sample(start)");
+        assert_eq!(
+            range, tail,
+            "decode_sample_range({start}, total) must equal decode_from_sample({start})"
+        );
+    }
+}
+
+#[test]
+fn decode_sample_range_empty_at_every_boundary() {
+    // s == e returns Ok(vec![]) for every s in [0, total_samples],
+    // including the upper boundary `s == total_samples` (which
+    // `decode_from_sample` rejects, but the half-open range accepts
+    // because it represents an empty selection at the very end).
+    let samples = pseudo_noise(44_100, 2, 0x7FFF, 0x0219_E007_DA7A);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let total = dec.header.total_samples as u64;
+
+    for &s in &[0u64, 1, total / 2, total - 1, total] {
+        let got = dec
+            .decode_sample_range(s, s)
+            .expect("decode_sample_range(s, s)");
+        assert!(
+            got.is_empty(),
+            "decode_sample_range({s}, {s}) must be empty"
+        );
+    }
+}
+
+#[test]
+fn frame_iter_sample_range_concat_matches_decode_sample_range() {
+    // The iterator path must produce, by concatenation, the same
+    // PCM that decode_sample_range materialises eagerly.
+    let samples = pseudo_noise(2 * 44_100, 2, 0x7FFF, 0x0219_C0AC_CA70);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let total = dec.header.total_samples as u64;
+
+    for &(start, end) in &[
+        (0u64, total),
+        (100, total - 100),
+        (total / 4, total * 3 / 4),
+        (total / 3, total / 2),
+    ] {
+        let eager = dec
+            .decode_sample_range(start, end)
+            .expect("decode_sample_range");
+        let lazy: Vec<i32> = dec
+            .frame_iter_sample_range(start, end)
+            .expect("frame_iter_sample_range")
+            .flat_map(|r| r.expect("frame decode"))
+            .collect();
+        assert_eq!(lazy, eager, "lazy concat must equal eager range");
+    }
+}
+
+#[test]
+fn frame_iter_sample_range_trailing_trim_lands_at_boundary() {
+    // When `end` falls mid-frame, the final yielded frame must be
+    // trimmed so its interleaved entry count matches the in-frame
+    // sample offset (not the full regular-frame width). Verifies
+    // the trim is in-place and exact.
+    let samples = pseudo_noise(3 * 44_100, 2, 0x7FFF, 0x0219_7A11_7E1A);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let nch = dec.header.channels as usize;
+    let regular = dec.header.regular_frame_samples() as u64;
+    // Pick `end` to land deep inside the second frame.
+    let start = 100u64;
+    let end = regular + 12_345;
+    let frames: Vec<Vec<i32>> = dec
+        .frame_iter_sample_range(start, end)
+        .expect("frame_iter_sample_range")
+        .map(|r| r.expect("frame decode"))
+        .collect();
+    // Should be exactly 2 yielded frames given start in frame 0 and
+    // end deep in frame 1.
+    assert_eq!(
+        frames.len(),
+        2,
+        "expected 2 yielded frames (head-trim + tail-trim)"
+    );
+    // First frame: regular - start in-frame samples.
+    let first_entries = (regular as usize - start as usize) * nch;
+    assert_eq!(
+        frames[0].len(),
+        first_entries,
+        "first frame must be head-trimmed to (regular - start) * channels"
+    );
+    // Second frame: 12_345 samples (= end - regular).
+    let second_entries = (end as usize - regular as usize) * nch;
+    assert_eq!(
+        frames[1].len(),
+        second_entries,
+        "second frame must be tail-trimmed to (end - regular) * channels"
+    );
+    // Total entries match the request width.
+    let total_entries: usize = frames.iter().map(|f| f.len()).sum();
+    assert_eq!(total_entries, (end - start) as usize * nch);
+}
+
+#[test]
+fn decode_time_range_matches_decode_sample_range_at_endpoints() {
+    use core::time::Duration;
+    // 2 s at 48 kHz — sample indices that are multiples of the rate
+    // map to whole-second `Duration`s with no floor residue, so the
+    // sample-keyed and duration-keyed range surfaces are guaranteed
+    // to agree byte-for-byte at these boundaries.
+    let samples = pseudo_noise(2 * 48_000, 2, 0x7FFF, 0x0219_71E3_AE0E);
+    let tta = encode(&samples, 2, 16, 48_000).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let rate = dec.header.sample_rate as u64; // 48_000
+    let total = dec.header.total_samples as u64; // 96_000
+    assert_eq!(total, 2 * rate);
+
+    // (start_sample, end_sample) pairs where both endpoints are
+    // multiples of `rate` and therefore round-trip exactly through
+    // `duration_to_sample_index` (`ns = s * 1e9 / rate` is exact when
+    // `s` is a multiple of `rate`).
+    for &(start_s, end_s) in &[
+        (0u64, total),    // full stream
+        (0u64, rate),     // first second
+        (rate, total),    // second second
+        (rate / 2, rate), // 0.5 s window — `rate/2` may not round-trip; nudged below
+    ] {
+        let start_t =
+            Duration::from_nanos(((start_s as u128) * 1_000_000_000u128 / (rate as u128)) as u64);
+        let end_t =
+            Duration::from_nanos(((end_s as u128) * 1_000_000_000u128 / (rate as u128)) as u64);
+        // Skip pairs where the round-trip is inexact (i.e. the
+        // re-floored value disagrees with the original).
+        let start_re = ((start_t.as_nanos() * rate as u128) / 1_000_000_000u128) as u64;
+        let end_re = ((end_t.as_nanos() * rate as u128) / 1_000_000_000u128) as u64;
+        if start_re != start_s || end_re != end_s {
+            continue;
+        }
+        let time_got = dec
+            .decode_time_range(start_t, end_t)
+            .expect("decode_time_range");
+        let sample_got = dec
+            .decode_sample_range(start_s, end_s)
+            .expect("decode_sample_range");
+        assert_eq!(
+            time_got, sample_got,
+            "decode_time_range and decode_sample_range must agree at exact-round-trip boundaries ({start_s}, {end_s})"
+        );
+    }
+}
+
+#[test]
+fn decode_time_range_full_duration_equals_decode_all() {
+    use core::time::Duration;
+    let samples = pseudo_noise(44_100, 2, 0x7FFF, 0x0219_F011_D02E);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let eager = dec.decode_all().expect("decode_all");
+    let dur = dec.total_duration();
+    let got = dec
+        .decode_time_range(Duration::ZERO, dur)
+        .expect("decode_time_range(0, total_duration)");
+    assert_eq!(got, eager);
+}
+
+#[test]
+fn frame_iter_time_range_concat_matches_decode_time_range() {
+    use core::time::Duration;
+    let samples = pseudo_noise(2 * 44_100, 2, 0x7FFF, 0x0219_F127_1E1E);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+
+    let start = Duration::from_millis(250);
+    let end = Duration::from_millis(750);
+    let eager = dec
+        .decode_time_range(start, end)
+        .expect("decode_time_range");
+    let lazy: Vec<i32> = dec
+        .frame_iter_time_range(start, end)
+        .expect("frame_iter_time_range")
+        .flat_map(|r| r.expect("frame decode"))
+        .collect();
+    assert_eq!(lazy, eager);
+}
+
+#[test]
+fn decode_sample_range_rejects_start_greater_than_end() {
+    let samples = pseudo_noise(44_100, 1, 0x7FFF, 0x0219_57A7_E2DE);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let total = dec.header.total_samples as u64;
+    assert_eq!(
+        dec.decode_sample_range(100, 50),
+        Err(crate::Error::SampleIndexOutOfRange),
+        "start > end must reject"
+    );
+    assert_eq!(
+        dec.decode_sample_range(total, total - 1),
+        Err(crate::Error::SampleIndexOutOfRange)
+    );
+    assert_eq!(
+        dec.frame_iter_sample_range(100, 50)
+            .err()
+            .expect("must be Err"),
+        crate::Error::SampleIndexOutOfRange
+    );
+}
+
+#[test]
+fn decode_sample_range_rejects_end_past_total_samples() {
+    let samples = pseudo_noise(44_100, 1, 0x7FFF, 0x0219_E2D0_0070);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let total = dec.header.total_samples as u64;
+    assert_eq!(
+        dec.decode_sample_range(0, total + 1),
+        Err(crate::Error::SampleIndexOutOfRange)
+    );
+    assert_eq!(
+        dec.decode_sample_range(total - 1, total + 5),
+        Err(crate::Error::SampleIndexOutOfRange)
+    );
+    // start == end == total + 1 still errors because end > total.
+    assert_eq!(
+        dec.decode_sample_range(total + 1, total + 1),
+        Err(crate::Error::SampleIndexOutOfRange)
+    );
+}
+
+#[test]
+fn decode_time_range_rejects_end_past_total_duration() {
+    use core::time::Duration;
+    let samples = pseudo_noise(44_100, 1, 0x7FFF, 0x0219_7103_00AE);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let rate = dec.header.sample_rate as u128;
+    let total = dec.header.total_samples as u128;
+    // The smallest duration that floors to `total_samples + 1` per
+    // `duration_to_sample_index`'s `floor(ns * rate / 1e9)` is the
+    // ceiling of `(total + 1) * 1e9 / rate`. Add 1 ns to land
+    // unambiguously past the boundary.
+    let past_ns = (((total + 1) * 1_000_000_000u128).div_ceil(rate)) + 1;
+    let past = Duration::from_nanos(past_ns as u64);
+    assert_eq!(
+        dec.decode_time_range(Duration::ZERO, past),
+        Err(crate::Error::SampleIndexOutOfRange),
+        "decode_time_range with end past total_duration must reject"
+    );
+    // Also pin `start > end` rejection on the duration-keyed surface.
+    assert_eq!(
+        dec.decode_time_range(Duration::from_secs(2), Duration::ZERO),
+        Err(crate::Error::SampleIndexOutOfRange),
+        "decode_time_range with start > end must reject"
+    );
+}
+
+#[test]
+fn decode_sample_range_format2_password_seek_and_clip_bit_exact() {
+    // Format=2 (password-protected) range under the per-frame qm
+    // re-prime discipline of spec/07 §3.5–§3.6 — locks that the
+    // bounded segment is bit-exact against the eager baseline.
+    let samples = pseudo_noise(2 * 44_100, 2, 0x7FFF, 0x0219_F2F2_5E60);
+    let password = b"r219-segment-key";
+    let tta =
+        encode_with_password(&samples, 2, 16, 44_100, password).expect("encode_with_password");
+    let dec =
+        crate::Decoder::new_with_password(&tta, password).expect("Decoder::new_with_password");
+    let eager = dec.decode_all().expect("decode_all");
+    let nch = dec.header.channels as usize;
+    let total = dec.header.total_samples as u64;
+    let start = total / 5;
+    let end = total * 4 / 5;
+    let got = dec
+        .decode_sample_range(start, end)
+        .expect("decode_sample_range");
+    let expected = &eager[(start as usize) * nch..(end as usize) * nch];
+    assert_eq!(got, expected);
+}

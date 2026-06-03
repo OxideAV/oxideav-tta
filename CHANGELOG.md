@@ -8,6 +8,66 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-219: half-open `[start, end)` sample- and duration-keyed range
+  quartet on `Decoder`, extending the round-209 / round-215 player-API
+  surface from "seek and play the tail" to "seek and play a bounded
+  segment". `Decoder::decode_sample_range(start, end)` returns the
+  interleaved `i32` PCM for per-channel samples `[start, end)`;
+  `Decoder::frame_iter_sample_range(start, end)` is the lazy analogue
+  returning a new `SampleRangeIter`; `Decoder::decode_time_range(start,
+  end)` / `Decoder::frame_iter_time_range(start, end)` are the
+  duration-keyed analogues that pre-floor both endpoints via the
+  existing `floor(time_ns × sample_rate / 1e9)` conversion. The
+  trailing frame is trimmed in-place via `Vec::truncate` so the
+  returned PCM is exactly `(end - start) × channels` interleaved
+  entries; frames past `end` are never decoded. The half-open
+  convention allows `end == total_samples` (equivalent to
+  `decode_from_sample(start)`) and `start == end` (returns
+  `Ok(vec![])` without touching the bitstream). `start > end` and
+  `end > total_samples` surface `Error::SampleIndexOutOfRange`. Format=2
+  (password-protected) reach is automatic through
+  `Decoder::new_with_password` — the per-frame qm re-prime discipline
+  of `spec/07` §3.5–§3.6 propagates unchanged through the new surface.
+  Sixteen new tests in `roundtrip_tests` lock the invariants:
+  - `decode_sample_range_matches_eager_slice_{mono16,stereo16,stereo24,
+    6ch16}_format1` — bit-exact agreement with
+    `decode_all()[start * nch .. end * nch]` across the parameter
+    cube on format=1.
+  - `decode_sample_range_matches_eager_slice_format2_password_stereo16`
+    — same on format=2 password-protected streams.
+  - `decode_sample_range_full_stream_equals_decode_all` —
+    `decode_sample_range(0, total)` equals `decode_all`.
+  - `decode_sample_range_to_total_equals_decode_from_sample` —
+    `decode_sample_range(s, total)` equals `decode_from_sample(s)`
+    for every starting `s`.
+  - `decode_sample_range_empty_at_every_boundary` — `s == e` returns
+    `Ok(vec![])` for `s ∈ [0, total_samples]`, including the upper
+    boundary `s == total_samples` that the half-open convention
+    permits.
+  - `frame_iter_sample_range_concat_matches_decode_sample_range` —
+    the lazy concatenation equals the eager materialisation.
+  - `frame_iter_sample_range_trailing_trim_lands_at_boundary` — when
+    `end` falls mid-frame, the final yielded `Vec<i32>` has exactly
+    `(end - frame_start) × channels` entries, not the full
+    regular-frame width.
+  - `decode_time_range_matches_decode_sample_range_at_endpoints` —
+    duration- and sample-keyed surfaces agree at exact-round-trip
+    `(sample_index, duration)` boundaries (rate-aligned indices).
+  - `decode_time_range_full_duration_equals_decode_all` —
+    `decode_time_range(Duration::ZERO, total_duration)` equals
+    `decode_all`.
+  - `frame_iter_time_range_concat_matches_decode_time_range` — lazy
+    duration-keyed iterator equals eager duration-keyed materialisation.
+  - `decode_sample_range_rejects_start_greater_than_end` and
+    `decode_sample_range_rejects_end_past_total_samples` — the typed
+    error shape on the sample-keyed surface.
+  - `decode_time_range_rejects_end_past_total_duration` — the typed
+    error shape on the duration-keyed surface (start > end and end
+    floored past `total_samples`).
+  - `decode_sample_range_format2_password_seek_and_clip_bit_exact` —
+    format=2 (password-protected) bounded segment under per-frame qm
+    re-prime discipline.
+
 - Round-215: duration-keyed player-API quartet on top of the round-209
   sample-keyed sugar. `Decoder::total_duration()` returns the stream's
   per-channel playback length as a `core::time::Duration` (integer
