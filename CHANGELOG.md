@@ -6,6 +6,16 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/OxideAV/oxideav-tta/compare/v0.0.2...v0.0.3) - 2026-06-03
+
+### Other
+
+- half-open sample/time range quartet on Decoder
+- duration-keyed player-API sugar on Decoder
+- decode_from_sample / frame_iter_from_sample player-API sugar
+- public Decoder::new_with_password — format=2 streaming reach
+- streaming bench parameter-cube extension
+
 ### Added
 
 - Round-219: half-open `[start, end)` sample- and duration-keyed range
