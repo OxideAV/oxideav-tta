@@ -657,6 +657,161 @@ impl<'a> Decoder<'a> {
         self.decode_from_sample(sample_index)
     }
 
+    /// Player-API sugar: eager half-open `[start, end)` sample range
+    /// decode.
+    ///
+    /// Returns the interleaved `i32` PCM for per-channel samples
+    /// `start..end`, where `end` may be one past the last sample
+    /// (`end == total_samples`). The yielded buffer has
+    /// `(end - start) * channels` entries; in particular, an
+    /// `start == end` request returns an empty `Vec` without touching
+    /// the bitstream. Equivalent to
+    /// `decode_all()[start * channels .. end * channels]` but without
+    /// paying for samples outside the requested range — the leading
+    /// prefix is skipped via [`Decoder::seek_to_sample`]'s `spec/01`
+    /// §4.1 arithmetic, and the trailing suffix is never decoded
+    /// (whole frames past `end` are dropped from the inner walk).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::SampleIndexOutOfRange`] when `start > end` (the range
+    ///   is invalid).
+    /// - [`Error::SampleIndexOutOfRange`] when `end > total_samples`
+    ///   (the range overshoots the stream). Note that `end ==
+    ///   total_samples` is **valid** — it means "to the very end" — so
+    ///   the half-open convention lines up with Rust's `Range` and
+    ///   `Vec` slicing.
+    ///
+    /// `start == total_samples` with `end == total_samples` returns
+    /// `Ok(vec![])` (empty range at the boundary). `start ==
+    /// total_samples` with `end > total_samples` errors per the
+    /// out-of-range rule.
+    pub fn decode_sample_range(&self, start: u64, end: u64) -> Result<Vec<i32>> {
+        let iter = self.frame_iter_sample_range(start, end)?;
+        let channels = self.header.channels as usize;
+        let suffix_entries = ((end - start) as usize).saturating_mul(channels);
+        let mut out = Vec::with_capacity(suffix_entries);
+        for frame in iter {
+            out.extend_from_slice(&frame?);
+        }
+        Ok(out)
+    }
+
+    /// Player-API sugar: lazy analogue of [`Decoder::decode_sample_range`].
+    ///
+    /// Returns a [`SampleRangeIter`] yielding interleaved `i32` PCM for
+    /// per-channel samples `start..end` (half-open). The concatenation
+    /// of every yielded `Vec<i32>` equals
+    /// `decode_sample_range(start, end)`'s `Vec`.
+    ///
+    /// The iterator decodes only the frames that overlap `[start, end)`:
+    /// the leading frame is trimmed at its head (per
+    /// [`Decoder::seek_to_sample`]'s in-frame offset), every interior
+    /// frame is yielded verbatim, and the trailing frame is trimmed at
+    /// its tail so the final concatenated count is exactly
+    /// `(end - start) * channels`. Frames past `end` are not decoded
+    /// at all.
+    ///
+    /// `start == end` returns an iterator that yields no frames; the
+    /// caller observes `Ok(())` from the wrapping call and an empty
+    /// iterator. `start == total_samples` with `end == total_samples`
+    /// is the same boundary case.
+    ///
+    /// Like [`Decoder::frame_iter_from_sample`], the iterator is
+    /// trace-silent (it does not emit `spec/06` trace events).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Decoder::decode_sample_range`].
+    pub fn frame_iter_sample_range(&self, start: u64, end: u64) -> Result<SampleRangeIter<'_, 'a>> {
+        if start > end {
+            return Err(Error::SampleIndexOutOfRange);
+        }
+        let total = self.header.total_samples as u64;
+        if end > total {
+            return Err(Error::SampleIndexOutOfRange);
+        }
+        let channels = self.header.channels as usize;
+        // Empty range short-circuit: no inner walk, no seek_to_sample
+        // call (the seek would reject `start == total_samples`).
+        if start == end {
+            return Ok(SampleRangeIter {
+                inner: SampleSkipIter {
+                    inner: FrameIter {
+                        decoder: self,
+                        next_idx: self.frames.len(),
+                    },
+                    prefix_to_skip: 0,
+                },
+                remaining_entries: 0,
+            });
+        }
+        // `start < end <= total` and `start < total` — the
+        // `seek_to_sample(start)` call is valid (`start < total_samples`).
+        let inner = self.frame_iter_from_sample(start)?;
+        let remaining_entries = ((end - start) as usize).saturating_mul(channels);
+        Ok(SampleRangeIter {
+            inner,
+            remaining_entries,
+        })
+    }
+
+    /// Player-API sugar: duration-keyed eager analogue of
+    /// [`Decoder::decode_sample_range`].
+    ///
+    /// Both endpoints are converted to per-channel sample indices via
+    /// the same `floor(time_ns * sample_rate / 1e9)` arithmetic used by
+    /// [`Decoder::seek_to_time`], then forwarded to
+    /// [`Decoder::decode_sample_range`].
+    ///
+    /// Returns the interleaved `i32` PCM for the half-open clock range
+    /// `[start, end)` of the stream's playback timeline; the yielded
+    /// buffer has `(sample_for(end) - sample_for(start)) * channels`
+    /// entries.
+    ///
+    /// `end == total_duration()` is valid and equivalent to "to the
+    /// end of the stream"; `end > total_duration()` errors per the
+    /// out-of-range rule on the underlying sample index. `start > end`
+    /// errors. `start == end` returns `Ok(vec![])`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Decoder::decode_sample_range`].
+    pub fn decode_time_range(
+        &self,
+        start: core::time::Duration,
+        end: core::time::Duration,
+    ) -> Result<Vec<i32>> {
+        let rate = self.header.sample_rate;
+        let start_sample = duration_to_sample_index(start, rate);
+        let end_sample = duration_to_sample_index(end, rate);
+        self.decode_sample_range(start_sample, end_sample)
+    }
+
+    /// Player-API sugar: duration-keyed lazy analogue of
+    /// [`Decoder::frame_iter_sample_range`].
+    ///
+    /// Both endpoints are converted to per-channel sample indices via
+    /// `floor(time_ns * sample_rate / 1e9)`, then forwarded to
+    /// [`Decoder::frame_iter_sample_range`].
+    ///
+    /// The concatenation of every yielded `Vec<i32>` equals
+    /// `decode_time_range(start, end)`'s `Vec`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Decoder::frame_iter_sample_range`].
+    pub fn frame_iter_time_range(
+        &self,
+        start: core::time::Duration,
+        end: core::time::Duration,
+    ) -> Result<SampleRangeIter<'_, 'a>> {
+        let rate = self.header.sample_rate;
+        let start_sample = duration_to_sample_index(start, rate);
+        let end_sample = duration_to_sample_index(end, rate);
+        self.frame_iter_sample_range(start_sample, end_sample)
+    }
+
     /// Emit the §5.1 container-level events plus the §5.2 per-channel
     /// init events to the trace tape, in the order required by §7.1
     /// and §7.2.
@@ -835,6 +990,64 @@ impl<'d, 'a> Iterator for SampleSkipIter<'d, 'a> {
 }
 
 impl<'d, 'a> ExactSizeIterator for SampleSkipIter<'d, 'a> {}
+
+/// Half-open `[start, end)` sample-range decoder iterator returned by
+/// [`Decoder::frame_iter_sample_range`] and
+/// [`Decoder::frame_iter_time_range`].
+///
+/// Yields the same content as a [`SampleSkipIter`] starting at `start`
+/// but stops once `(end - start) * channels` interleaved entries have
+/// been produced. The trailing frame is trimmed in-place so the final
+/// concatenated count is exact.
+///
+/// The iterator is **trace-silent**: the underlying [`FrameIter`] does
+/// not emit `spec/06` trace events, and the head- / tail-trim wrapper
+/// adds no events of its own.
+pub struct SampleRangeIter<'d, 'a> {
+    inner: SampleSkipIter<'d, 'a>,
+    /// Remaining interleaved entries to yield across all subsequent
+    /// `next()` calls. The inner walk stops yielding once this reaches
+    /// zero, regardless of how many frames remain in the seek table.
+    remaining_entries: usize,
+}
+
+impl<'d, 'a> Iterator for SampleRangeIter<'d, 'a> {
+    type Item = Result<Vec<i32>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining_entries == 0 {
+            return None;
+        }
+        match self.inner.next()? {
+            Ok(mut pcm) => {
+                if pcm.len() > self.remaining_entries {
+                    // Trailing frame: trim the suffix so the final
+                    // concatenation hits the requested per-sample
+                    // boundary exactly. The drop is in-place
+                    // (`Vec::truncate`) and is O(1) on the truncated
+                    // tail beyond `remaining_entries`.
+                    pcm.truncate(self.remaining_entries);
+                }
+                self.remaining_entries -= pcm.len();
+                Some(Ok(pcm))
+            }
+            Err(e) => {
+                // Surface the error and let the inner iterator
+                // short-circuit on subsequent calls.
+                self.remaining_entries = 0;
+                Some(Err(e))
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // Upper bound is the inner walk's upper bound; the lower bound
+        // is 0 because a bitstream error could short-circuit before
+        // any further frame yields.
+        let (_, upper) = self.inner.size_hint();
+        (0, upper)
+    }
+}
 
 /// Convert a clock `Duration` to the corresponding per-channel sample
 /// index at `sample_rate` Hz, using integer arithmetic so the result is

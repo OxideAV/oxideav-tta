@@ -72,6 +72,14 @@
 //!   [`Decoder::decode_from_time`] (round 215) layers `core::time::Duration`
 //!   sugar over the sample-keyed surface via integer-arithmetic
 //!   `(time_ns, sample_rate)` conversion per `spec/01` §3.3 / §3.4.
+//!   The half-open range quartet [`Decoder::decode_sample_range`] /
+//!   [`Decoder::frame_iter_sample_range`] /
+//!   [`Decoder::decode_time_range`] / [`Decoder::frame_iter_time_range`]
+//!   (round 219) extends the player-API surface from "seek and play
+//!   the tail" to "seek and play a bounded segment" — the trailing
+//!   frame is trimmed in-place so the returned PCM is exactly
+//!   `(end - start) * channels` interleaved entries, and frames past
+//!   the requested end are not decoded at all.
 //!   [`Decoder::new`] constructs over a format=1 stream;
 //!   [`Decoder::new_with_password`] constructs over either format and
 //!   wires the `spec/07` qm priming for format=2 streams, so the same
@@ -101,7 +109,9 @@ mod tables;
 mod trace;
 mod trailers;
 
-pub use crate::decoder::{decode_frame, Decoder, FrameIter, SampleSkipIter, SeekPoint};
+pub use crate::decoder::{
+    decode_frame, Decoder, FrameIter, SampleRangeIter, SampleSkipIter, SeekPoint,
+};
 pub use crate::encoder::{encode, encode_with_password};
 pub use crate::error::{Error, Result};
 pub use crate::header::{FrameDescriptor, StreamHeader};

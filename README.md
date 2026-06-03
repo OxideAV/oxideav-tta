@@ -7,12 +7,14 @@ Pure-Rust True Audio (TTA) lossless audio codec for the
 
 **Round 5 (+ r187 streaming surface, r204 format=2 streaming reach,
 r209 sample-keyed player-API sugar, r215 duration-keyed player-API
-sugar) — clean-room encoder + decoder + framework integration + trace
-tape + format=2 + ID3v1/APEv2 trailer detection + multi-frame format=2
-trace coverage + format=2 streaming/random-access surface +
-`decode_from_sample` / `frame_iter_from_sample` + `decode_from_time` /
-`frame_iter_from_time` / `seek_to_time` / `total_duration`.** Both
-encodes and decodes TTA1 format=1
+sugar, r219 half-open sample/time range quartet) — clean-room encoder
++ decoder + framework integration + trace tape + format=2 +
+ID3v1/APEv2 trailer detection + multi-frame format=2 trace coverage +
+format=2 streaming/random-access surface + `decode_from_sample` /
+`frame_iter_from_sample` + `decode_from_time` / `frame_iter_from_time` /
+`seek_to_time` / `total_duration` + `decode_sample_range` /
+`frame_iter_sample_range` / `decode_time_range` /
+`frame_iter_time_range`.** Both encodes and decodes TTA1 format=1
 (integer PCM) and format=2 (password-derived qm priming, `spec/07`)
 streams in pure safe Rust against the strict-isolation clean-room
 workspace at
@@ -95,6 +97,41 @@ the inner equivalence to the by-hand composition, the
 `sample_index = 0` round-trip, the `total_samples - 1` boundary
 returning exactly `channels` entries, and the
 `SampleIndexOutOfRange` rejection shape on both APIs.
+
+Round 219 extends the r209 / r215 player-API surface from "seek and
+play the tail" to "seek and play a bounded segment" via a half-open
+`[start, end)` range quartet on `Decoder`. The eager
+`Decoder::decode_sample_range(start, end)` returns the interleaved
+`i32` PCM for per-channel samples `start..end`; the lazy
+`Decoder::frame_iter_sample_range(start, end)` returns a new
+`SampleRangeIter` whose concatenation equals the eager call. The
+duration-keyed `Decoder::decode_time_range(start, end)` and
+`Decoder::frame_iter_time_range(start, end)` pre-floor both endpoints
+via the same `floor(time_ns × sample_rate / 1e9)` arithmetic the
+round-215 sugar already uses. The trailing frame is trimmed in-place
+via `Vec::truncate`, so the returned PCM is exactly
+`(end - start) × channels` interleaved entries and frames past `end`
+are never decoded. The half-open convention permits
+`end == total_samples` (equivalent to `decode_from_sample(start)`)
+and `start == end` (returns `Ok(vec![])` without touching the
+bitstream); `start > end` and `end > total_samples` surface
+`Error::SampleIndexOutOfRange`. Format=2 (password-protected) reach
+is automatic via `Decoder::new_with_password` — the per-frame qm
+re-prime discipline of `spec/07` §3.5–§3.6 propagates through the
+new surface unchanged. Sixteen new tests in `roundtrip_tests` pin
+bit-exact agreement with `decode_all`'s slice across the parameter
+cube (mono16 / stereo16 / stereo24 / 6ch16 in format=1, stereo16 in
+format=2), the boundary collapses (`(0, total) ⇔ decode_all`,
+`(s, total) ⇔ decode_from_sample(s)`, `(s, s) ⇔ Ok(vec![])` for
+`s ∈ [0, total_samples]`), the lazy/eager concatenation equivalence,
+the trailing-frame trim landing at the exact mid-frame boundary,
+the time-keyed surface agreeing with the sample-keyed surface at
+exact-round-trip rate-aligned boundaries, and the
+`SampleIndexOutOfRange` rejection shape on `start > end` and
+`end > total_samples` for both the sample-keyed and the
+duration-keyed surfaces. Total 140 lib + 9 integration after r219
+(with `--all-features`); 135 lib + 9 integration on the default
+feature set.
 
 The fresh orphan `master` is the starting point; the previous
 implementation, retired alongside the OxideAV docs audit dated
