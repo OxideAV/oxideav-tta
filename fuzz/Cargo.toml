@@ -40,6 +40,22 @@ cargo-fuzz = true
 #   must match the eager slice, `seek_to_sample`'s returned indices
 #   must be in range, and `frame_iter_from(start)` must equal the
 #   eager suffix from the corresponding sample boundary.
+# - **`sample_range`** (round 226): panic-free walk of the round-209 /
+#   round-215 / round-219 player-API sugar on `Decoder` —
+#   `decode_from_sample`, `frame_iter_from_sample`,
+#   `decode_sample_range(start, end)`, `frame_iter_sample_range`,
+#   `decode_time_range`, `frame_iter_time_range`. Folds attacker-
+#   chosen `(start, end)` seeds against the constructed Decoder's
+#   `total_samples` and asserts: (i) `decode_from_sample(s)` equals
+#   `decode_all()[s * channels..]`; (ii) `decode_sample_range(s, e)`
+#   equals `decode_all()[s * channels .. e * channels]`; (iii) lazy
+#   `frame_iter_*` concatenations equal their eager siblings; (iv) the
+#   boundary collapses `(0, total) ⇔ decode_all`,
+#   `(s, total) ⇔ decode_from_sample(s)`, `(s, s) ⇔ Ok(vec![])`;
+#   (v) `start > end` and `end > total_samples` surface
+#   `SampleIndexOutOfRange` (panic-free typed rejection); (vi)
+#   `decode_time_range(Duration::ZERO, total_duration)` equals
+#   `decode_all`.
 [dependencies]
 libfuzzer-sys = "0.4"
 
@@ -80,5 +96,11 @@ doc = false
 [[bin]]
 name = "streaming_decode"
 path = "fuzz_targets/streaming_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "sample_range"
+path = "fuzz_targets/sample_range.rs"
 test = false
 doc = false

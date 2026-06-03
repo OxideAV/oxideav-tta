@@ -8,6 +8,50 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-226: new `sample_range` cargo-fuzz target under
+  `fuzz/fuzz_targets/sample_range.rs` that drives the round-209 /
+  round-215 / round-219 player-API sugar on `Decoder` —
+  `decode_from_sample`, `frame_iter_from_sample`,
+  `decode_sample_range(start, end)`, `frame_iter_sample_range`,
+  `decode_time_range`, and `frame_iter_time_range`. Folds
+  attacker-chosen `(start, end)` `u64` seeds against
+  `total_samples + 1` (admitting `start == total` and
+  `end == total` per the half-open contract) and routes the pair
+  through a 4-mode bias byte covering the canonical
+  `start ≤ end` agreement branch, the swapped `start > end`
+  rejection branch, and the empty-range boundary cases
+  `(0, 0)` / `(total, total)`. The harness asserts the round-209 /
+  r215 / r219 invariants on every fuzz-constructed stream: (i)
+  `decode_from_sample(s)` equals `decode_all()[s × channels..]`;
+  (ii) `decode_sample_range(s, e)` equals
+  `decode_all()[s × channels .. e × channels]` bit-exactly; (iii)
+  lazy `frame_iter_*` concatenations equal their eager siblings
+  on both the sample- and duration-keyed pairs; (iv) boundary
+  collapses `(0, total) ⇔ decode_all`,
+  `(s, total) ⇔ decode_from_sample(s)`,
+  `(s, s) ⇔ Ok(vec![])` for `s ∈ [0, total]`; (v) `start > end`
+  and `end > total_samples` surface
+  `Error::SampleIndexOutOfRange`. The `decode_time_range(ZERO,
+  total_duration())` boundary is intentionally NOT asserted equal
+  to `decode_all` — the duration round-trip
+  `samples → Duration → samples` floor-arithmetic is lossy by one
+  sample when `total_samples * 1e9 / sample_rate` lacks an exact
+  integer-nanosecond representation, and the pre-existing
+  `roundtrip_tests::decode_time_range_full_duration_equals_decode_all`
+  hand-fixture only covers the rate-aligned case (44 100 samples
+  at 44 100 Hz). Seed corpus under `fuzz/corpus/sample_range/`:
+  20 small fixtures (mono16 ramp / mono16 pw / mono24 / stereo16 /
+  tiny-silent replicated across the four range-mode prefixes) +
+  4 multi-frame fixtures (mono16-3s, stereo16-3s, stereo24-2.5s,
+  stereo16-pw-3s) at the canonical mode for the cross-API
+  agreement path. Bin block registered in `fuzz/Cargo.toml` so
+  the `.github/workflows/fuzz.yml` shim discovers it
+  automatically. 200K iters clean from a cold start under
+  `cargo +nightly fuzz run sample_range`; the seeded corpus
+  achieves 7K+ iters per 60 s (per-iteration cost is heavy
+  because every input forces multiple eager `decode_all` passes
+  for the agreement assertion).
+
 - Round-219: half-open `[start, end)` sample- and duration-keyed range
   quartet on `Decoder`, extending the round-209 / round-215 player-API
   surface from "seek and play the tail" to "seek and play a bounded

@@ -346,12 +346,52 @@ live under `fuzz/fuzz_targets/`:
   five real-stream fixtures plus four crate-encoded multi-frame
   streams (mono16/stereo16/stereo24 at 2.5-3 s + a format=2 stereo
   3 s).
+- **`sample_range`** (round 226) — drives the round-209 / r215 /
+  r219 player-API sugar on [`Decoder`](src/decoder.rs):
+  `decode_from_sample`, `frame_iter_from_sample`,
+  `decode_sample_range(start, end)`, `frame_iter_sample_range`,
+  `decode_time_range`, and `frame_iter_time_range`. Folds
+  attacker-chosen `(start, end)` `u64` seeds against
+  `total_samples + 1` (so `start == total` and `end == total` are
+  both reachable per the half-open contract), then routes the pair
+  through a 4-mode bias byte covering the canonical
+  `start ≤ end` agreement branch, the swapped `start > end`
+  rejection branch, and the empty-range boundary cases
+  `(0, 0)` / `(total, total)`. Asserts (i) `decode_from_sample(s)`
+  equals `decode_all()[s * channels..]`; (ii)
+  `decode_sample_range(s, e)` equals
+  `decode_all()[s * channels .. e * channels]`; (iii) the lazy
+  `frame_iter_*` surfaces concatenate to their eager siblings on
+  both the sample- and duration-keyed pairs; (iv) the boundary
+  collapses `(0, total) ⇔ decode_all`,
+  `(s, total) ⇔ decode_from_sample(s)`,
+  `(s, s) ⇔ Ok(vec![])` for `s ∈ [0, total]`; (v) `start > end`
+  and `end > total_samples` surface
+  `Error::SampleIndexOutOfRange` (panic-free typed rejection) on
+  both the sample- and duration-keyed surfaces. The duration-keyed
+  `decode_time_range(Duration::ZERO, total_duration())` is *not*
+  asserted equal to `decode_all`: the duration round-trip is lossy
+  by one sample when `total_samples * 1e9 / sample_rate` doesn't
+  have an exact integer-nanosecond representation, and the
+  pre-existing `roundtrip_tests::decode_time_range_full_duration_equals_decode_all`
+  hand-fixture only covers the rate-aligned case (44 100 samples
+  at 44 100 Hz). Seed corpus under `fuzz/corpus/sample_range/` is
+  derived from the `streaming_decode` 9-stream real-fixture pool:
+  nine small seeds (mono16 ramp / mono16 pw / mono24 / stereo16 /
+  tiny-silent) are replicated across the four range-mode prefixes
+  for 20 small entries, plus four canonical-mode multi-frame
+  streams (mono16-3s, stereo16-3s, stereo24-2.5s, stereo16-pw-3s)
+  for the cross-API agreement path. 200K iters clean from a cold
+  start, 7K+ iters per 60 s with the seeded corpus (per-iteration
+  cost is heavy because every input forces multiple eager
+  `decode_all` passes for the agreement check).
 
-The harness body is clean-room (no `libtta` oracle). Run locally with
-`cargo +nightly fuzz run <target>`; the `.github/workflows/fuzz.yml`
-shim points at the org reusable workflow which auto-discovers every
-`[[bin]]` block in `fuzz/Cargo.toml` and splits the daily 30-minute
-budget across them.
+The harness body is clean-room (no reference-implementation
+oracle). Run locally with `cargo +nightly fuzz run <target>`; the
+`.github/workflows/fuzz.yml` shim points at the org reusable
+workflow which auto-discovers every `[[bin]]` block in
+`fuzz/Cargo.toml` and splits the daily 30-minute budget across
+them.
 
 The `decode` harness found one bug (round 124): a corrupt high-mode
 bitstream could chain enough Rice escapes to drive the adaptive
