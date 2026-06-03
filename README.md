@@ -6,11 +6,12 @@ Pure-Rust True Audio (TTA) lossless audio codec for the
 ## Status
 
 **Round 5 (+ r187 streaming surface, r204 format=2 streaming reach,
-r209 sample-keyed player-API sugar) — clean-room encoder + decoder +
-framework integration + trace tape + format=2 + ID3v1/APEv2 trailer
-detection + multi-frame format=2 trace coverage + format=2
-streaming/random-access surface + `decode_from_sample` /
-`frame_iter_from_sample`.** Both
+r209 sample-keyed player-API sugar, r215 duration-keyed player-API
+sugar) — clean-room encoder + decoder + framework integration + trace
+tape + format=2 + ID3v1/APEv2 trailer detection + multi-frame format=2
+trace coverage + format=2 streaming/random-access surface +
+`decode_from_sample` / `frame_iter_from_sample` + `decode_from_time` /
+`frame_iter_from_time` / `seek_to_time` / `total_duration`.** Both
 encodes and decodes TTA1 format=1
 (integer PCM) and format=2 (password-derived qm priming, `spec/07`)
 streams in pure safe Rust against the strict-isolation clean-room
@@ -42,6 +43,41 @@ seek-and-resume integration path on format=2, the format=1
 fall-through (priming computed then dropped per audit/07 §6.2-2), the
 spec/07 §11 "wrong-password decodes but corrupts" semantic, and the
 `FrameIndexOutOfRange` / `SampleIndexOutOfRange` rejection shape.
+
+Round 215 layers a duration-keyed convenience quartet on top of the
+sample-keyed round-209 player surface:
+`Decoder::total_duration()` returns the stream's per-channel playback
+length as a `core::time::Duration` (computed from `total_samples` and
+`sample_rate` via integer arithmetic at nanosecond granularity, no
+floating-point intermediates), and `Decoder::seek_to_time(d)` /
+`Decoder::frame_iter_from_time(d)` / `Decoder::decode_from_time(d)`
+mirror the existing sample-keyed seek surface against a clock
+`Duration` from stream start. The `Duration → sample_index`
+conversion is `floor(time_ns × sample_rate / 1e9)` widened to `u128`
+so the multiplication is overflow-free for the full
+`(sample_rate ≤ 0x7FFFFF, Duration ≤ Duration::MAX)` envelope (per
+`spec/01` §3.3 cap); the floor is monotone non-decreasing and never
+overshoots the true sample boundary. Out-of-range times surface
+`Error::SampleIndexOutOfRange` (`time >= total_duration` →
+`sample_index >= total_samples`), `Duration::MAX` does not panic.
+Nine new tests in `roundtrip_tests` lock the invariants:
+total-duration arithmetic at sample-aligned and one-sample-past
+endpoints, `seek_to_time(Duration::ZERO)` landing at sample 0,
+`seek_to_time` equivalence with `seek_to_sample` at sample-rate-aligned
+boundaries, `seek_to_time` rejection at and past `total_duration`,
+`decode_from_time` bit-exact equivalence with `decode_from_sample`
+across multi-frame format=1, `frame_iter_from_time` lazy
+concatenation matching the eager tail, `frame_iter_from_time` /
+`decode_from_time` rejecting past-end, format=2 (password-protected)
+duration-keyed seek-and-resume bit-exact agreement with eager
+`decode_with_password`, and the sub-sample-period boundary discipline
+(two timestamps within the same sample period collapse to one
+SeekPoint; the next sample-boundary advances by exactly one sample).
+Eight extra unit tests in `decoder::duration_helpers_tests` walk the
+arithmetic primitive at the rate × sample-index cube. Total
+123 lib + 9 integration after r215 (r209's `110 lib` was an
+under-count of the actual surface; the r215 additions land cleanly
+on top).
 
 Round 209 layers a player-API convenience pair on top of the same
 streaming surface: `Decoder::decode_from_sample(sample_index)`

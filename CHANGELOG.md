@@ -8,6 +8,69 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-215: duration-keyed player-API quartet on top of the round-209
+  sample-keyed sugar. `Decoder::total_duration()` returns the stream's
+  per-channel playback length as a `core::time::Duration` (integer
+  arithmetic at nanosecond granularity from `(total_samples,
+  sample_rate)` per `spec/01` §3.3 / §3.4 — no floating-point);
+  `Decoder::seek_to_time(d)` resolves a clock `Duration` from stream
+  start to the same `SeekPoint` that `seek_to_sample(s)` would return
+  for the corresponding floor-rounded sample index;
+  `Decoder::frame_iter_from_time(d)` returns the trace-silent
+  `SampleSkipIter` from `frame_iter_from_sample` against the same
+  resolved index; `Decoder::decode_from_time(d)` is the eager analogue
+  (interleaved `i32` tail). The `Duration → sample_index` conversion
+  is `floor(time_ns × sample_rate / 1e9)` widened to `u128` so the
+  multiplication is overflow-free for the full
+  `(sample_rate ≤ 0x7FFFFF, Duration ≤ Duration::MAX)` envelope; the
+  floor is monotone non-decreasing and never overshoots the true
+  sample boundary. Out-of-range times surface
+  `Error::SampleIndexOutOfRange` (no panic on `Duration::MAX`). Nine
+  integration tests in `roundtrip_tests` lock the public surface:
+  - `total_duration_matches_total_samples_over_sample_rate` —
+    `total_samples / sample_rate` arithmetic at sample-aligned and
+    one-sample-past endpoints (`110 250 / 44 100 = 2.5 s` exact;
+    `44 101 / 44 100 = 1 s + 22 675 ns`).
+  - `seek_to_time_zero_lands_at_first_sample` — `Duration::ZERO`
+    resolves to `SeekPoint { frame_index: 0, sample_offset_in_frame: 0 }`.
+  - `seek_to_time_matches_seek_to_sample_at_equivalent_time` —
+    millisecond timestamps at sample-rate-aligned boundaries resolve
+    to the same SeekPoint as the corresponding `seek_to_sample`
+    call.
+  - `seek_to_time_at_total_duration_rejects` — `time == total_duration`
+    and `time >= total_duration + 1 s` and `Duration::MAX` all
+    surface `Error::SampleIndexOutOfRange` without panicking.
+  - `decode_from_time_matches_decode_from_sample_bit_exact` —
+    multi-frame format=1 mono `decode_from_time(ms)` equals
+    `decode_from_sample(ms × sample_rate / 1000)` bit-exactly across
+    a sweep.
+  - `frame_iter_from_time_concat_matches_eager_tail` — lazy iterator's
+    concatenation equals `decode_all`'s tail from the resolved
+    sample cursor.
+  - `frame_iter_from_time_rejects_past_end` —
+    `frame_iter_from_time(total_duration)` and
+    `decode_from_time(total_duration)` both error.
+  - `time_apis_format2_seek_and_resume_bit_exact` — format=2
+    (password-protected) eager + lazy duration-keyed seek-and-resume
+    match `decode_with_password`'s tail; the per-frame qm re-prime
+    discipline of `spec/07` §3.5–§3.6 propagates through the sugar
+    unchanged.
+  - `seek_to_time_sub_sample_period_resolves_to_same_sample` —
+    boundary discipline: two timestamps within the same sample
+    period at 48 kHz collapse to the same SeekPoint; the
+    `target_sample + 1` boundary advances by exactly one sample.
+
+  Plus eight unit tests in `decoder::duration_helpers_tests` walking
+  the `duration_to_sample_index` / `samples_to_duration` primitives
+  at the rate × sample-index cube
+  (`{44 100, 48 000, 96 000, 0x7FFFFF}` × `{0, 1, 2, rate,
+  rate × 5 + 17}`) and the boundary-rounding properties (monotone,
+  floor-floor round-trip within one sample period, sample-rate-zero
+  short-circuit). Pre-existing test surface: 106 lib + 9 integration
+  (the round-209 CHANGELOG's `100 lib + 9` undercounted by 6 — the
+  delta sat in non-roundtrip modules like `tables`, `trailers`,
+  `stage_b`, etc.); r215 adds 9 + 8 = 17 lib tests, total 123 + 9.
+
 - Round-209: public `Decoder::decode_from_sample(sample_index)` and
   `Decoder::frame_iter_from_sample(sample_index)` — player-API sugar
   that combines the round-187 `seek_to_sample` + `frame_iter_from`

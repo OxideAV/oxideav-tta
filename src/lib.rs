@@ -66,7 +66,12 @@
 //!   memory regardless of stream length), [`Decoder::decode_frame_at`]
 //!   (random-access by frame index), and the
 //!   [`Decoder::seek_to_sample`] / [`Decoder::frame_iter_from`]
-//!   pair for resume-from-sample seeking via the seek table.
+//!   pair for resume-from-sample seeking via the seek table. The
+//!   duration-keyed quartet [`Decoder::total_duration`] /
+//!   [`Decoder::seek_to_time`] / [`Decoder::frame_iter_from_time`] /
+//!   [`Decoder::decode_from_time`] (round 215) layers `core::time::Duration`
+//!   sugar over the sample-keyed surface via integer-arithmetic
+//!   `(time_ns, sample_rate)` conversion per `spec/01` §3.3 / §3.4.
 //!   [`Decoder::new`] constructs over a format=1 stream;
 //!   [`Decoder::new_with_password`] constructs over either format and
 //!   wires the `spec/07` qm priming for format=2 streams, so the same

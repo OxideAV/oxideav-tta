@@ -578,6 +578,85 @@ impl<'a> Decoder<'a> {
         Ok(out)
     }
 
+    /// Total per-channel playback duration of the stream.
+    ///
+    /// Computed from the header's `total_samples` and `sample_rate`
+    /// fields per `spec/01` §3.3 / §3.4. The whole-seconds and
+    /// sub-second components are derived in integer arithmetic from
+    /// the wire-side `(total_samples, sample_rate)` pair so the result
+    /// is exact at nanosecond granularity (no floating-point
+    /// intermediates) for any in-scope stream (`sample_rate` capped at
+    /// `0x7FFFFF` per `spec/01` §3.3, `total_samples` at most
+    /// `u32::MAX`).
+    ///
+    /// Special case: `sample_rate == 0` is not validly accepted by
+    /// [`Decoder::new`], but if a hand-constructed [`Decoder`] ever
+    /// reached this method with `sample_rate == 0`, `Duration::ZERO`
+    /// is returned (no division). The same convention applies to
+    /// `total_samples == 0`.
+    pub fn total_duration(&self) -> core::time::Duration {
+        samples_to_duration(self.header.total_samples as u64, self.header.sample_rate)
+    }
+
+    /// Locate the per-channel sample at clock time `time` from the
+    /// start of the stream, returning the same [`SeekPoint`] that
+    /// [`Decoder::seek_to_sample`] would return for the corresponding
+    /// sample index.
+    ///
+    /// The sample index is computed by integer arithmetic from
+    /// `(time_ns, sample_rate)`: `sample_index = floor(time_ns *
+    /// sample_rate / 1_000_000_000)`. The intermediate is widened to
+    /// `u128` so the multiplication does not overflow even for the
+    /// upper-end `sample_rate = 0x7FFFFF` × `Duration::MAX` envelope.
+    ///
+    /// The conversion is monotonically non-decreasing in `time`; two
+    /// timestamps within the same sample period (`1 / sample_rate`
+    /// seconds) round to the same sample index, which then resolves
+    /// to the same `(frame_index, sample_offset_in_frame)` pair under
+    /// `spec/01` §4.1.
+    ///
+    /// Returns [`Error::SampleIndexOutOfRange`] when `time` lies at or
+    /// past [`Decoder::total_duration`]; `time = Duration::ZERO` always
+    /// resolves to the first sample of the stream (assuming
+    /// `total_samples > 0`).
+    pub fn seek_to_time(&self, time: core::time::Duration) -> Result<SeekPoint> {
+        let sample_index = duration_to_sample_index(time, self.header.sample_rate);
+        self.seek_to_sample(sample_index)
+    }
+
+    /// Player-API sugar: convert `time` to a per-channel sample
+    /// boundary via [`Decoder::seek_to_time`], then forward to
+    /// [`Decoder::frame_iter_from_sample`].
+    ///
+    /// The returned iterator yields interleaved `i32` PCM samples
+    /// starting at the boundary; the concatenation of every yielded
+    /// `Vec<i32>` equals the suffix of [`Decoder::decode_all`] from
+    /// the corresponding sample cursor.
+    ///
+    /// Returns [`Error::SampleIndexOutOfRange`] when `time` lies at or
+    /// past [`Decoder::total_duration`].
+    pub fn frame_iter_from_time(
+        &self,
+        time: core::time::Duration,
+    ) -> Result<SampleSkipIter<'_, 'a>> {
+        let sample_index = duration_to_sample_index(time, self.header.sample_rate);
+        self.frame_iter_from_sample(sample_index)
+    }
+
+    /// Player-API sugar: eager analogue of
+    /// [`Decoder::frame_iter_from_time`]. Returns the interleaved
+    /// `i32` PCM tail of the stream starting at clock time `time`,
+    /// equivalent to
+    /// `decode_all()[sample_index_for(time) * channels..]` but without
+    /// paying for the discarded prefix.
+    ///
+    /// Returns [`Error::SampleIndexOutOfRange`] when `time` lies at or
+    /// past [`Decoder::total_duration`].
+    pub fn decode_from_time(&self, time: core::time::Duration) -> Result<Vec<i32>> {
+        let sample_index = duration_to_sample_index(time, self.header.sample_rate);
+        self.decode_from_sample(sample_index)
+    }
+
     /// Emit the §5.1 container-level events plus the §5.2 per-channel
     /// init events to the trace tape, in the order required by §7.1
     /// and §7.2.
@@ -756,3 +835,148 @@ impl<'d, 'a> Iterator for SampleSkipIter<'d, 'a> {
 }
 
 impl<'d, 'a> ExactSizeIterator for SampleSkipIter<'d, 'a> {}
+
+/// Convert a clock `Duration` to the corresponding per-channel sample
+/// index at `sample_rate` Hz, using integer arithmetic so the result is
+/// exact and overflow-free for the entire in-scope envelope.
+///
+/// The formula is `floor(time_ns * sample_rate / 1_000_000_000)`,
+/// promoted to `u128` for the multiplication so the largest in-scope
+/// combination (`sample_rate = 0x7FFFFF`, `Duration::MAX` ≈
+/// `18 446 744 073 709 551 615` seconds) cannot overflow.
+///
+/// The result is clamped to `u64::MAX` for the (otherwise unreachable)
+/// case where it exceeds the addressing range of [`Decoder::seek_to_sample`]'s
+/// `u64` argument; the subsequent `seek_to_sample` call will then
+/// surface [`Error::SampleIndexOutOfRange`] in the usual way.
+///
+/// A `sample_rate == 0` decoder (rejected by [`Decoder::new`] but
+/// reachable in unit tests) returns `0` — no division by zero —
+/// which is the correct sentinel given there is no playable stream.
+fn duration_to_sample_index(time: core::time::Duration, sample_rate: u32) -> u64 {
+    if sample_rate == 0 {
+        return 0;
+    }
+    let ns = time.as_nanos();
+    let prod = ns.saturating_mul(sample_rate as u128);
+    let idx = prod / 1_000_000_000u128;
+    if idx > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        idx as u64
+    }
+}
+
+/// Convert a per-channel sample count to a `Duration` at `sample_rate`
+/// Hz with nanosecond granularity. Inverse of
+/// [`duration_to_sample_index`] under the floor-division boundary
+/// convention (`samples_to_duration(N+1, rate) − samples_to_duration(N,
+/// rate)` is exactly one sample period rounded to nanoseconds).
+///
+/// `sample_rate == 0` returns [`core::time::Duration::ZERO`].
+fn samples_to_duration(samples: u64, sample_rate: u32) -> core::time::Duration {
+    if sample_rate == 0 {
+        return core::time::Duration::ZERO;
+    }
+    let secs = samples / (sample_rate as u64);
+    let remainder = samples % (sample_rate as u64);
+    // Sub-second component in nanoseconds: floor(remainder * 1e9 /
+    // sample_rate). Widened to u128 so the multiplication cannot
+    // overflow (remainder < sample_rate ≤ 0x7FFFFF, so the product
+    // fits easily — the widening is a defensive cost-free
+    // simplification).
+    let nanos = ((remainder as u128) * 1_000_000_000u128) / (sample_rate as u128);
+    core::time::Duration::new(secs, nanos as u32)
+}
+
+#[cfg(test)]
+mod duration_helpers_tests {
+    use super::{duration_to_sample_index, samples_to_duration};
+    use core::time::Duration;
+
+    #[test]
+    fn duration_zero_maps_to_sample_zero() {
+        assert_eq!(duration_to_sample_index(Duration::ZERO, 44_100), 0);
+    }
+
+    #[test]
+    fn one_second_at_44100_hz_is_44100_samples() {
+        assert_eq!(
+            duration_to_sample_index(Duration::from_secs(1), 44_100),
+            44_100
+        );
+    }
+
+    #[test]
+    fn duration_truncates_to_nearest_sample_boundary_below() {
+        // 0.5 sample-periods at 44.1 kHz → floor to sample 0.
+        let half_period = Duration::from_nanos(1_000_000_000 / 44_100 / 2);
+        assert_eq!(duration_to_sample_index(half_period, 44_100), 0);
+
+        // 1.5 sample-periods → floor to sample 1.
+        let one_and_half =
+            Duration::from_nanos((1_000_000_000u64 / 44_100) + (1_000_000_000u64 / 44_100 / 2));
+        assert_eq!(duration_to_sample_index(one_and_half, 44_100), 1);
+    }
+
+    #[test]
+    fn duration_is_monotone_nondecreasing() {
+        let mut prev = 0u64;
+        for ms in 0..200u64 {
+            let cur = duration_to_sample_index(Duration::from_millis(ms), 48_000);
+            assert!(cur >= prev, "monotonicity at {ms} ms: {cur} < {prev}");
+            prev = cur;
+        }
+    }
+
+    #[test]
+    fn sample_rate_zero_yields_zero() {
+        assert_eq!(duration_to_sample_index(Duration::from_secs(10), 0), 0);
+    }
+
+    #[test]
+    fn samples_to_duration_round_trip_within_one_sample_period() {
+        // `samples_to_duration` and `duration_to_sample_index` are
+        // both floor-rounded against the sample-period grid: at
+        // rates where `1_000_000_000 / rate` is not an integer, the
+        // forward conversion drops a sub-nanosecond residue, and the
+        // reverse floor can then land one sample short. The round
+        // trip therefore converges to `{n - 1, n}` within one sample
+        // period — exactly the property a player API needs (a
+        // `Duration` cursor never overshoots the true sample boundary).
+        for rate in [44_100u32, 48_000, 96_000, 0x7FFFFF] {
+            for n in [0u64, 1, 2, rate as u64, (rate as u64) * 5 + 17] {
+                let d = samples_to_duration(n, rate);
+                let back = duration_to_sample_index(d, rate);
+                assert!(
+                    back == n || back + 1 == n,
+                    "round-trip out-of-range at rate={rate} n={n}: dur={d:?} back={back}"
+                );
+                // Nudging the duration up by one nanosecond when
+                // `back == n - 1` must close the gap (or stay at `n`
+                // if it was already there). This is the
+                // "never-overshoots" half of the player-API contract.
+                let plus_one_ns = d + core::time::Duration::from_nanos(1);
+                let back_plus = duration_to_sample_index(plus_one_ns, rate);
+                assert!(
+                    back_plus >= back,
+                    "+1ns must be monotone at rate={rate} n={n}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn samples_to_duration_unit_period_matches_nanos() {
+        // At 44.1 kHz one sample period is 1_000_000_000 / 44_100 ns
+        // (floor). Verify the helper agrees.
+        let one_sample = samples_to_duration(1, 44_100);
+        let expected_ns = 1_000_000_000u128 / 44_100u128;
+        assert_eq!(one_sample.as_nanos(), expected_ns);
+    }
+
+    #[test]
+    fn samples_to_duration_sample_rate_zero_is_zero() {
+        assert_eq!(samples_to_duration(123, 0), Duration::ZERO);
+    }
+}

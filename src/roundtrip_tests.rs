@@ -1510,3 +1510,235 @@ fn frame_iter_from_sample_format2_seek_and_resume_bit_exact() {
     }
     assert_eq!(got, expected_tail);
 }
+
+// ---------------------------------------------------------------
+// Round 215 — Duration-keyed player-API surface.
+//
+// `Decoder::total_duration`, `Decoder::seek_to_time`,
+// `Decoder::frame_iter_from_time`, `Decoder::decode_from_time` —
+// integer-arithmetic Duration ↔ sample-index conversion atop the
+// existing sample-keyed seek surface (`spec/01` §3.3 / §3.4 / §4.1).
+// ---------------------------------------------------------------
+
+#[test]
+fn total_duration_matches_total_samples_over_sample_rate() {
+    use core::time::Duration;
+    // 2.5 s at 44.1 kHz → 110 250 samples. The integer-arithmetic
+    // total_duration helper must reproduce 2.5 s exactly modulo the
+    // sample-period quantisation.
+    let samples = pseudo_noise(110_250, 2, 0x7FFF, 0xD0D0_BEEF);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+
+    // 110 250 / 44 100 = 2.5 exactly → 2 s + 500 ms.
+    assert_eq!(dec.total_duration(), Duration::from_millis(2_500));
+
+    // Different shape: 1 s 1 sample (44 101 samples) at 44.1 kHz →
+    // 1.000022... s. The helper carries the sub-sample remainder in
+    // nanoseconds at integer precision.
+    let samples2 = pseudo_noise(44_101, 1, 0x7FFF, 0xABCD_EF01);
+    let tta2 = encode(&samples2, 1, 16, 44_100).expect("encode 44101");
+    let dec2 = crate::Decoder::new(&tta2).expect("Decoder::new 44101");
+    let expected_ns = 1_000_000_000u128 + (1_000_000_000u128 / 44_100u128);
+    assert_eq!(dec2.total_duration().as_nanos(), expected_ns);
+}
+
+#[test]
+fn seek_to_time_zero_lands_at_first_sample() {
+    use core::time::Duration;
+    let samples = pseudo_noise(44_100, 1, 0x7FFF, 0xAACC_DDEE);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+
+    let sp = dec.seek_to_time(Duration::ZERO).expect("seek");
+    assert_eq!(sp.frame_index, 0);
+    assert_eq!(sp.sample_offset_in_frame, 0);
+}
+
+#[test]
+fn seek_to_time_matches_seek_to_sample_at_equivalent_time() {
+    use core::time::Duration;
+    // 2 s stereo at 44.1 kHz → spans 88 200 samples ≈ 1.92 frames
+    // (regular_frame_samples = floor(44100 × 256 / 245) = 46 073), so
+    // there are 2 frames; mid-stream lands inside frame 0 or 1.
+    let samples = pseudo_noise(88_200, 2, 0x7FFF, 0xBEEF_F00D);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+
+    for &(time_ms, expected_sample) in &[
+        (0u64, 0u64),
+        (500, 22_050),
+        (1_000, 44_100),
+        (1_500, 66_150),
+    ] {
+        let t = Duration::from_millis(time_ms);
+        let from_time = dec.seek_to_time(t).expect("seek_to_time");
+        let from_sample = dec.seek_to_sample(expected_sample).expect("seek_to_sample");
+        assert_eq!(
+            from_time, from_sample,
+            "seek_to_time({time_ms} ms) must equal seek_to_sample({expected_sample})"
+        );
+    }
+}
+
+#[test]
+fn seek_to_time_at_total_duration_rejects() {
+    use core::time::Duration;
+    let samples = pseudo_noise(44_100, 1, 0x7FFF, 0xCAFE_F00D);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+
+    // Exactly total_duration: sample index = total_samples → out of
+    // range (the last addressable sample is total_samples - 1).
+    let td = dec.total_duration();
+    assert_eq!(
+        dec.seek_to_time(td),
+        Err(crate::Error::SampleIndexOutOfRange)
+    );
+    // Past the end: also out of range, no panic.
+    assert_eq!(
+        dec.seek_to_time(td + Duration::from_secs(1)),
+        Err(crate::Error::SampleIndexOutOfRange)
+    );
+    // Duration::MAX must not panic.
+    assert_eq!(
+        dec.seek_to_time(Duration::MAX),
+        Err(crate::Error::SampleIndexOutOfRange)
+    );
+}
+
+#[test]
+fn decode_from_time_matches_decode_from_sample_bit_exact() {
+    use core::time::Duration;
+    // Multi-frame mono format=1: 2 s @ 44.1 kHz → 88 200 samples
+    // across two regular frames.
+    let samples = pseudo_noise(88_200, 1, 0x7FFF, 0x600D_C00C);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+
+    for &time_ms in &[0u64, 250, 500, 750, 1_500] {
+        let t = Duration::from_millis(time_ms);
+        let from_time = dec.decode_from_time(t).expect("decode_from_time");
+        let sample_index = time_ms * 44_100 / 1_000;
+        let from_sample = dec
+            .decode_from_sample(sample_index)
+            .expect("decode_from_sample");
+        assert_eq!(
+            from_time, from_sample,
+            "decode_from_time({time_ms} ms) must equal decode_from_sample({sample_index})"
+        );
+    }
+}
+
+#[test]
+fn frame_iter_from_time_concat_matches_eager_tail() {
+    use core::time::Duration;
+    // 2 s stereo @ 44.1 kHz; mid-stream resume via frame_iter_from_time
+    // must equal the eager tail bit-exactly.
+    let samples = pseudo_noise(88_200, 2, 0x7FFF, 0xC0DE_C0DE);
+    let tta = encode(&samples, 2, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let eager = dec.decode_all().expect("decode_all");
+    let nch = dec.header.channels as usize;
+
+    let t = Duration::from_millis(1_000); // 1 s in → sample 44 100.
+    let cursor = 44_100usize * nch;
+    let expected_tail = &eager[cursor..];
+
+    let mut got: Vec<i32> = Vec::new();
+    for r in dec.frame_iter_from_time(t).expect("frame_iter_from_time") {
+        got.extend_from_slice(&r.expect("frame decode"));
+    }
+    assert_eq!(got, expected_tail);
+}
+
+#[test]
+fn frame_iter_from_time_rejects_past_end() {
+    let samples = pseudo_noise(44_100, 1, 0x7FFF, 0xACAB_F00D);
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let td = dec.total_duration();
+    assert!(dec.frame_iter_from_time(td).is_err());
+    assert!(dec.decode_from_time(td).is_err());
+}
+
+#[test]
+fn time_apis_format2_seek_and_resume_bit_exact() {
+    use core::time::Duration;
+    // Format=2 (password-protected) equivalent of
+    // `decode_from_time_matches_decode_from_sample_bit_exact`: the
+    // per-frame qm re-prime discipline (`spec/07` §3.5–§3.6) must
+    // propagate through the duration-keyed sugar unchanged.
+    let samples = pseudo_noise(2 * 44_100, 2, 0x7FFF, 0xACE_2150);
+    let password = b"r215-duration-api";
+    let tta = encode_with_password(&samples, 2, 16, 44_100, password).expect("encode format=2");
+    let dec =
+        crate::Decoder::new_with_password(&tta, password).expect("Decoder::new_with_password");
+    let eager = dec.decode_all().expect("decode_all");
+    let nch = dec.header.channels as usize;
+
+    let t = Duration::from_millis(1_000);
+    let cursor = 44_100usize * nch;
+    let expected_tail = &eager[cursor..];
+
+    // Eager path equivalence.
+    let from_time = dec.decode_from_time(t).expect("decode_from_time");
+    assert_eq!(from_time.len(), expected_tail.len());
+    assert_eq!(from_time, expected_tail);
+
+    // Lazy path equivalence.
+    let mut got: Vec<i32> = Vec::new();
+    for r in dec.frame_iter_from_time(t).expect("frame_iter_from_time") {
+        got.extend_from_slice(&r.expect("frame decode"));
+    }
+    assert_eq!(got, expected_tail);
+}
+
+#[test]
+fn seek_to_time_sub_sample_period_resolves_to_same_sample() {
+    use core::time::Duration;
+    // Two timestamps lying within the same sample period at 48 kHz
+    // must produce the same SeekPoint — the floor conversion
+    // collapses sub-sample variability. A timestamp on the *next*
+    // sample-boundary must advance by exactly one sample. The
+    // 48 kHz period in floor-nanoseconds is `1_000_000_000 / 48_000
+    // = 20833`, which carries a sub-nanosecond truncation residue,
+    // so the boundary itself is the smallest time strictly greater
+    // than `n × period_ns_exact`; the worked test uses ns-accurate
+    // floor-then-add boundary arithmetic to avoid the residue.
+    let samples = pseudo_noise(48_000, 1, 0x7FFF, 0xD0D0_F00D);
+    let tta = encode(&samples, 1, 16, 48_000).expect("encode");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+
+    // Pick a sample index we want to test the boundary around.
+    let target_sample = 5_904u64;
+    // The duration corresponding to `target_sample` under the
+    // crate's floor convention — the seek_to_time at this value
+    // must return `target_sample`, and at this value plus a small
+    // positive nudge must still return `target_sample`.
+    let target_sample_ns = (target_sample as u128) * 1_000_000_000u128 / 48_000u128;
+    let at_boundary = Duration::from_nanos(target_sample_ns as u64);
+    let at_boundary_sp = dec.seek_to_time(at_boundary).expect("seek boundary");
+    let by_sample = dec.seek_to_sample(target_sample).expect("seek by sample");
+    assert_eq!(at_boundary_sp, by_sample);
+
+    // 1 ns later (still well inside the sample period) — same
+    // sample.
+    let one_ns_later = at_boundary + Duration::from_nanos(1);
+    let one_ns_sp = dec.seek_to_time(one_ns_later).expect("seek +1 ns");
+    assert_eq!(at_boundary_sp, one_ns_sp);
+
+    // The boundary of `target_sample + 1` — must advance by one
+    // sample.
+    let next_sample_ns = ((target_sample + 1) as u128) * 1_000_000_000u128 / 48_000u128;
+    // Add 1 ns to nudge past the truncation residue (the floor of
+    // `(target_sample + 1) × period_exact` can sit a residue
+    // *below* the true boundary, depending on the rate).
+    let next_boundary = Duration::from_nanos(next_sample_ns as u64 + 1);
+    let next_sp = dec.seek_to_time(next_boundary).expect("seek next boundary");
+    let cross_sp = dec
+        .seek_to_sample(target_sample + 1)
+        .expect("seek by next sample");
+    assert_eq!(next_sp, cross_sp);
+    assert_ne!(next_sp, at_boundary_sp);
+}
