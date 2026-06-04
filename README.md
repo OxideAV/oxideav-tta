@@ -493,4 +493,33 @@ noise of the format=1 sibling at the same shape, confirming the
 per-frame qm priming write is negligible against the Rice + Stage-A
 LMS + Stage-B + decorr cascade cost.
 
-Run locally with `cargo bench -p oxideav-tta --bench <decode|encode|roundtrip|streaming>`.
+Round 234 adds `benches/range.rs`, a fifth Criterion harness
+covering the round-209 / round-215 / round-219 player-API range
+surface on [`Decoder`](src/decoder.rs) — `decode_from_sample` /
+`frame_iter_from_sample` (r209), `decode_from_time` / `seek_to_time`
+/ `total_duration` (r215), and the half-open `[start, end)` range
+quartet `decode_sample_range` / `frame_iter_sample_range` /
+`decode_time_range` / `frame_iter_time_range` (r219). Eleven
+scenarios run against the same 3 s stereo 16-bit 44.1 kHz anchor
+the `streaming.rs` harness uses, so the per-API cost diffs against
+the existing baselines: `range_decode_from_sample_mid` /
+`range_frame_iter_from_sample_mid` measure tail-from-mid-stream cost
+(eager vs lazy); `range_decode_from_time_mid` adds the duration →
+sample-index conversion on top; `range_seek_to_time_mid` is the
+duration-keyed sentinel for the constant-time `spec/01` §4.1
+arithmetic; `range_decode_sample_range_middle_half` /
+`range_frame_iter_sample_range_middle_half` /
+`range_decode_time_range_middle_half` exercise the half-open range
+quartet across the middle 50 % of the stream;
+`range_decode_sample_range_full` measures the full-stream boundary
+case `[0, total_samples)` against the eager `decode_all` baseline;
+`range_decode_sample_range_empty` is a sentinel against accidentally
+routing the empty-range short-circuit through the seek path; and
+`range_decode_sample_range_format2_middle_half` adds the format=2
+reach at the same parameter point so the per-frame qm re-prime
+(`spec/07` §3.5–§3.6) cost is comparable against the format=1
+anchor. `range_total_duration` rounds out the file as a
+sub-nanosecond sentinel against accidentally promoting the integer-
+arithmetic primitive to a heavier computation.
+
+Run locally with `cargo bench -p oxideav-tta --bench <decode|encode|roundtrip|streaming|range>`.

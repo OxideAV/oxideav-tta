@@ -61,3 +61,16 @@ harness = false
 [[bench]]
 name = "streaming"
 harness = false
+
+# Round 234 (range + duration-keyed player-API sugar bench): covers
+# the r209 / r215 / r219 surface on `Decoder` (`decode_from_sample`,
+# `frame_iter_from_sample`, `decode_from_time`, `seek_to_time`,
+# `total_duration`, `decode_sample_range`, `frame_iter_sample_range`,
+# `decode_time_range`). Same self-contained pattern (no checked-in
+# fixtures; PCM synthesised in-bench then run through the production
+# `encode` / `encode_with_password`). Includes a format=2 reach cell
+# at the same parameter point as the format=1 anchor so the per-
+# frame qm re-prime cost is comparable.
+[[bench]]
+name = "range"
+harness = false
