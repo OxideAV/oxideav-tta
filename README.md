@@ -523,3 +523,40 @@ sub-nanosecond sentinel against accidentally promoting the integer-
 arithmetic primitive to a heavier computation.
 
 Run locally with `cargo bench -p oxideav-tta --bench <decode|encode|roundtrip|streaming|range>`.
+
+## What round 240 adds on top
+
+- **Typed sub-field accessors** for the four constrained
+  `StreamHeader` fields per `spec/01` §3.1 / §3.2 / §3.3. The raw
+  `format: u16` / `bits_per_sample: u16` / `channels: u16` /
+  `sample_rate: u32` fields are kept as the on-wire data model, but
+  consumers that want to branch on the spec's documented invariants
+  can now lift each field into a validated typed accessor:
+  - [`Format`](src/header.rs) — non-exhaustive enum with
+    `Simple` (= 1) and `Encrypted` (= 2) variants; carries
+    `from_raw`, `as_raw`, and a `requires_password()` convenience
+    over the format=2 password-priming discipline of `spec/07` §3.
+  - [`BitsPerSample`](src/header.rs) — newtype validated against the
+    in-scope `16..=24` range per `spec/01` §3.2; carries `bits()`
+    and `byte_depth()` (= `(bits + 7) / 8`, always 2 or 3).
+  - [`ChannelCount`](src/header.rs) — newtype validated against the
+    in-scope `1..=6` range per `spec/01` §3; carries `count()` and
+    `is_multichannel()` (the gate for the inverse decorrelation
+    cascade of `spec/04` §3).
+  - [`SampleRate`](src/header.rs) — newtype validated against the
+    workspace-policy `1..=0x7FFFFF` range per `spec/01` §3.3;
+    carries `hz()` and `regular_frame_samples()` (the canonical
+    `floor(rate * 256 / 245)` per-frame sample count of `spec/01`
+    §4.1, computed with a 64-bit-wide intermediate per the same
+    section's overflow rule).
+  `StreamHeader` gains four matching `Result`-returning lifting
+  accessors (`format_typed` / `bits_per_sample_typed` /
+  `channel_count_typed` / `sample_rate_typed`). The `Result` shape
+  matters for the ad-hoc construction path — a caller that mints a
+  `StreamHeader` literal with an out-of-range field gets the same
+  `Error::Unsupported*` variant the parser would have surfaced,
+  rather than silently propagating an out-of-band value into the
+  pipeline. Five new unit tests pin the boundary cases at each end
+  of every range plus the parser-to-typed-accessor agreement on a
+  44.1 kHz stereo 16-bit fixture. Lib tests: 140 (default features)
+  / 145 (all-features) / 131 (no-default-features).

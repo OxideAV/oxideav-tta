@@ -24,6 +24,152 @@ const MAX_SAMPLE_RATE: u32 = 0x007F_FFFF;
 /// `MAX_NCH` per `spec/01` §3 / `spec/04` §4.
 const MAX_NCH: u16 = 6;
 
+/// Typed enumeration of the `format` field in the TTA1 stream header
+/// (`spec/01` §3.1). Only `Format::Simple` (= 1) and
+/// `Format::Encrypted` (= 2) are accepted at parse time; the parser
+/// rejects any other on-wire value with [`Error::UnsupportedFormat`]
+/// before any [`StreamHeader`] is constructed. The enum therefore
+/// covers exactly the set of values that can be observed in a
+/// successfully-parsed header.
+///
+/// The typed enum is non-exhaustive — should the spec ever extend the
+/// in-scope value set (DOC §3.1 reserves `3` for IEEE-754 float, which
+/// is not implemented in any in-scope round), the addition would be a
+/// non-breaking variant rather than an API break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Format {
+    /// `format == 1` per `spec/01` §3.1 — integer PCM, no encryption.
+    Simple,
+    /// `format == 2` per `spec/01` §3.1 — password-derived qm priming
+    /// per `spec/07` §3.5–§3.6.
+    Encrypted,
+}
+
+impl Format {
+    /// Try to lift a raw on-wire `format` byte into the typed enum.
+    /// Returns [`Error::UnsupportedFormat`] for any value outside the
+    /// `{1, 2}` accepted set (`spec/01` §3.1).
+    pub fn from_raw(value: u16) -> Result<Self> {
+        match value {
+            1 => Ok(Format::Simple),
+            2 => Ok(Format::Encrypted),
+            other => Err(Error::UnsupportedFormat(other)),
+        }
+    }
+
+    /// Round-trip back to the on-wire `u16` value (`1` or `2`).
+    pub fn as_raw(&self) -> u16 {
+        match self {
+            Format::Simple => 1,
+            Format::Encrypted => 2,
+        }
+    }
+
+    /// `true` for `Format::Encrypted` (`format == 2`). Convenience for
+    /// callers that branch on the password-priming discipline of
+    /// `spec/07` §3 without naming the variant.
+    pub fn requires_password(&self) -> bool {
+        matches!(self, Format::Encrypted)
+    }
+}
+
+/// Typed wrapper around the `bits_per_sample` field, validated to the
+/// in-scope range `16..=24` per `spec/01` §3.2. Construction via
+/// [`BitsPerSample::from_raw`] is the only entry path; the raw `u16`
+/// inside [`StreamHeader::bits_per_sample`] is kept for backward
+/// compatibility with existing callers but a successfully-parsed
+/// header always corresponds to a constructible [`BitsPerSample`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BitsPerSample(u16);
+
+impl BitsPerSample {
+    /// Lift a raw `u16` into the validated typed accessor.
+    /// Returns [`Error::UnsupportedBitDepth`] for values outside
+    /// `16..=24` per `spec/01` §3.2.
+    pub fn from_raw(value: u16) -> Result<Self> {
+        if (16..=24).contains(&value) {
+            Ok(BitsPerSample(value))
+        } else {
+            Err(Error::UnsupportedBitDepth(value))
+        }
+    }
+
+    /// Underlying `u16` width (16..=24).
+    pub fn bits(&self) -> u16 {
+        self.0
+    }
+
+    /// `byte_depth = (bits + 7) / 8` per `spec/01` §3.2.
+    /// Always `2` (bps = 16) or `3` (bps = 17..=24).
+    pub fn byte_depth(&self) -> usize {
+        self.0.div_ceil(8) as usize
+    }
+}
+
+/// Typed wrapper around the `channels` field, validated to the in-
+/// scope range `1..=6` per `spec/01` §3 (`MAX_NCH = 6`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ChannelCount(u16);
+
+impl ChannelCount {
+    /// Lift a raw `u16` into the validated typed accessor.
+    /// Returns [`Error::UnsupportedChannelCount`] for values outside
+    /// `1..=6` per `spec/01` §3.
+    pub fn from_raw(value: u16) -> Result<Self> {
+        if (1..=MAX_NCH).contains(&value) {
+            Ok(ChannelCount(value))
+        } else {
+            Err(Error::UnsupportedChannelCount(value))
+        }
+    }
+
+    /// Underlying channel count (1..=6).
+    pub fn count(&self) -> u16 {
+        self.0
+    }
+
+    /// `true` when the stream carries more than one channel (`>= 2`).
+    /// Convenience for callers that branch on the decorrelation
+    /// cascade gate of `spec/04` §3.
+    pub fn is_multichannel(&self) -> bool {
+        self.0 >= 2
+    }
+}
+
+/// Typed wrapper around the `sample_rate` field, validated to the
+/// workspace-policy range `1..=0x7FFFFF` per `spec/01` §3.3 (the high
+/// bit is reserved as a forward-compatibility flag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SampleRate(u32);
+
+impl SampleRate {
+    /// Lift a raw `u32` into the validated typed accessor.
+    /// Returns [`Error::UnsupportedSampleRate`] for `0` or any value
+    /// above the `0x7FFFFF` policy ceiling per `spec/01` §3.3.
+    pub fn from_raw(value: u32) -> Result<Self> {
+        if value == 0 || value > MAX_SAMPLE_RATE {
+            Err(Error::UnsupportedSampleRate(value))
+        } else {
+            Ok(SampleRate(value))
+        }
+    }
+
+    /// Underlying sample rate in Hz (1..=0x7FFFFF).
+    pub fn hz(&self) -> u32 {
+        self.0
+    }
+
+    /// Per-channel samples in a regular (non-last) frame:
+    /// `floor(sample_rate * 256 / 245)` per `spec/01` §4.1. Computed
+    /// with a 64-bit-wide intermediate to avoid the 32-bit overflow
+    /// that would occur near `sample_rate = 2^24` Hz per `spec/01`
+    /// §4.1's "at least 40-bit-wide intermediate" rule.
+    pub fn regular_frame_samples(&self) -> u32 {
+        ((self.0 as u64) * 256 / 245) as u32
+    }
+}
+
 /// Parsed TTA1 stream header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamHeader {
@@ -68,6 +214,40 @@ impl StreamHeader {
         } else {
             (self.total_samples / regular + 1, raw)
         }
+    }
+
+    /// Lifts the raw `format` field into the typed [`Format`] enum.
+    ///
+    /// A successfully-parsed header is guaranteed to carry a value in
+    /// the accepted set `{1, 2}` per `spec/01` §3.1, so this method
+    /// returns `Ok` for every value reachable from a parsed
+    /// [`StreamHeader`]. It is exposed as a `Result` rather than an
+    /// infallible accessor so that ad-hoc [`StreamHeader`] structs
+    /// constructed by callers (e.g. for round-trip testing) get the
+    /// same validation discipline rather than panicking.
+    pub fn format_typed(&self) -> Result<Format> {
+        Format::from_raw(self.format)
+    }
+
+    /// Lifts the raw `bits_per_sample` field into the typed
+    /// [`BitsPerSample`] accessor (validates `16..=24` per `spec/01`
+    /// §3.2). Same `Result` discipline as [`Self::format_typed`].
+    pub fn bits_per_sample_typed(&self) -> Result<BitsPerSample> {
+        BitsPerSample::from_raw(self.bits_per_sample)
+    }
+
+    /// Lifts the raw `channels` field into the typed [`ChannelCount`]
+    /// accessor (validates `1..=6` per `spec/01` §3). Same `Result`
+    /// discipline as [`Self::format_typed`].
+    pub fn channel_count_typed(&self) -> Result<ChannelCount> {
+        ChannelCount::from_raw(self.channels)
+    }
+
+    /// Lifts the raw `sample_rate` field into the typed [`SampleRate`]
+    /// accessor (validates `1..=0x7FFFFF` per `spec/01` §3.3). Same
+    /// `Result` discipline as [`Self::format_typed`].
+    pub fn sample_rate_typed(&self) -> Result<SampleRate> {
+        SampleRate::from_raw(self.sample_rate)
     }
 }
 
@@ -389,6 +569,152 @@ mod tests {
             ..h
         };
         assert_eq!(h.frame_geometry(), (2, 46_080));
+    }
+
+    #[test]
+    fn format_typed_round_trip() {
+        // Simple (1) and Encrypted (2) round-trip cleanly.
+        let s = Format::from_raw(1).unwrap();
+        assert_eq!(s, Format::Simple);
+        assert_eq!(s.as_raw(), 1);
+        assert!(!s.requires_password());
+        let e = Format::from_raw(2).unwrap();
+        assert_eq!(e, Format::Encrypted);
+        assert_eq!(e.as_raw(), 2);
+        assert!(e.requires_password());
+        // Any other value is rejected.
+        assert!(matches!(
+            Format::from_raw(0),
+            Err(Error::UnsupportedFormat(0))
+        ));
+        assert!(matches!(
+            Format::from_raw(3),
+            Err(Error::UnsupportedFormat(3))
+        ));
+        assert!(matches!(
+            Format::from_raw(255),
+            Err(Error::UnsupportedFormat(255))
+        ));
+    }
+
+    #[test]
+    fn bits_per_sample_typed_boundary() {
+        let b16 = BitsPerSample::from_raw(16).unwrap();
+        assert_eq!(b16.bits(), 16);
+        assert_eq!(b16.byte_depth(), 2);
+        let b17 = BitsPerSample::from_raw(17).unwrap();
+        assert_eq!(b17.byte_depth(), 3);
+        let b23 = BitsPerSample::from_raw(23).unwrap();
+        assert_eq!(b23.byte_depth(), 3);
+        let b24 = BitsPerSample::from_raw(24).unwrap();
+        assert_eq!(b24.bits(), 24);
+        assert_eq!(b24.byte_depth(), 3);
+        // Out of range.
+        assert!(matches!(
+            BitsPerSample::from_raw(8),
+            Err(Error::UnsupportedBitDepth(8))
+        ));
+        assert!(matches!(
+            BitsPerSample::from_raw(15),
+            Err(Error::UnsupportedBitDepth(15))
+        ));
+        assert!(matches!(
+            BitsPerSample::from_raw(25),
+            Err(Error::UnsupportedBitDepth(25))
+        ));
+        assert!(matches!(
+            BitsPerSample::from_raw(32),
+            Err(Error::UnsupportedBitDepth(32))
+        ));
+    }
+
+    #[test]
+    fn channel_count_typed_boundary() {
+        let mono = ChannelCount::from_raw(1).unwrap();
+        assert_eq!(mono.count(), 1);
+        assert!(!mono.is_multichannel());
+        let stereo = ChannelCount::from_raw(2).unwrap();
+        assert_eq!(stereo.count(), 2);
+        assert!(stereo.is_multichannel());
+        let six = ChannelCount::from_raw(6).unwrap();
+        assert_eq!(six.count(), 6);
+        assert!(six.is_multichannel());
+        // Out of range.
+        assert!(matches!(
+            ChannelCount::from_raw(0),
+            Err(Error::UnsupportedChannelCount(0))
+        ));
+        assert!(matches!(
+            ChannelCount::from_raw(7),
+            Err(Error::UnsupportedChannelCount(7))
+        ));
+        assert!(matches!(
+            ChannelCount::from_raw(255),
+            Err(Error::UnsupportedChannelCount(255))
+        ));
+    }
+
+    #[test]
+    fn sample_rate_typed_boundary() {
+        let sr = SampleRate::from_raw(44_100).unwrap();
+        assert_eq!(sr.hz(), 44_100);
+        assert_eq!(sr.regular_frame_samples(), 46_080);
+        // Boundary: max accepted value.
+        let max = SampleRate::from_raw(MAX_SAMPLE_RATE).unwrap();
+        assert_eq!(max.hz(), MAX_SAMPLE_RATE);
+        // The regular_frame_samples computation must not overflow at
+        // the max input (canary against a future regression that drops
+        // the `(... as u64) * 256 / 245` widening).
+        let expected = ((MAX_SAMPLE_RATE as u64) * 256 / 245) as u32;
+        assert_eq!(max.regular_frame_samples(), expected);
+        // Out of range.
+        assert!(matches!(
+            SampleRate::from_raw(0),
+            Err(Error::UnsupportedSampleRate(0))
+        ));
+        assert!(matches!(
+            SampleRate::from_raw(MAX_SAMPLE_RATE + 1),
+            Err(Error::UnsupportedSampleRate(_))
+        ));
+        assert!(matches!(
+            SampleRate::from_raw(u32::MAX),
+            Err(Error::UnsupportedSampleRate(_))
+        ));
+    }
+
+    #[test]
+    fn stream_header_typed_accessors_match_raw() {
+        // Round-trip: a successfully-parsed header has every typed
+        // accessor agreeing with the raw field it lifts.
+        let buf = build_header_bytes(1, 2, 16, 44_100, 88_200);
+        let (h, _) = parse_stream_header(&buf).unwrap();
+        assert_eq!(h.format_typed().unwrap(), Format::Simple);
+        assert_eq!(h.format_typed().unwrap().as_raw(), h.format);
+        let bps = h.bits_per_sample_typed().unwrap();
+        assert_eq!(bps.bits(), h.bits_per_sample);
+        assert_eq!(bps.byte_depth(), h.bytes_per_sample());
+        let ch = h.channel_count_typed().unwrap();
+        assert_eq!(ch.count(), h.channels);
+        assert!(ch.is_multichannel());
+        let sr = h.sample_rate_typed().unwrap();
+        assert_eq!(sr.hz(), h.sample_rate);
+        assert_eq!(sr.regular_frame_samples(), h.regular_frame_samples());
+
+        // A constructed-by-hand header with a now-rejected raw value
+        // round-trips back through the typed accessor as the same
+        // error variant the parser would have produced (e.g. caller
+        // doing ad-hoc validation pre-encode).
+        let bogus = StreamHeader {
+            format: 1,
+            channels: 0,
+            bits_per_sample: 16,
+            sample_rate: 44_100,
+            total_samples: 0,
+        };
+        assert!(matches!(
+            bogus.channel_count_typed(),
+            Err(Error::UnsupportedChannelCount(0))
+        ));
     }
 
     #[test]

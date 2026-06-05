@@ -114,7 +114,9 @@ pub use crate::decoder::{
 };
 pub use crate::encoder::{encode, encode_with_password};
 pub use crate::error::{Error, Result};
-pub use crate::header::{FrameDescriptor, StreamHeader};
+pub use crate::header::{
+    BitsPerSample, ChannelCount, Format, FrameDescriptor, SampleRate, StreamHeader,
+};
 pub use crate::trailers::{detect_trailers, TrailerInfo};
 
 /// Re-exported alias for the parsed stream header. [`StreamInfo`] is

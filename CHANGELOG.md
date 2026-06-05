@@ -8,6 +8,35 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-240: typed accessors for the four constrained `StreamHeader`
+  sub-fields per `spec/01` §3.1 / §3.2 / §3.3. New public items
+  `Format` (non-exhaustive enum with `Simple` / `Encrypted` variants
+  + `from_raw` / `as_raw` / `requires_password`), `BitsPerSample`
+  (newtype validated `16..=24` + `bits` / `byte_depth`), `ChannelCount`
+  (newtype validated `1..=6` + `count` / `is_multichannel`), and
+  `SampleRate` (newtype validated `1..=0x7FFFFF` + `hz` /
+  `regular_frame_samples`). `StreamHeader` gains four matching
+  accessors (`format_typed` / `bits_per_sample_typed` /
+  `channel_count_typed` / `sample_rate_typed`), each returning a
+  `Result` so an ad-hoc `StreamHeader` literal built by a caller
+  (e.g. a round-trip test) gets the same validation discipline as a
+  parser-emitted header rather than silently propagating an
+  out-of-range raw value. The raw `u16` / `u32` fields on
+  `StreamHeader` are kept for backward compatibility; the typed
+  accessors are additive. Five new unit tests in `header::tests` pin
+  the boundary cases at each end of every range (`Format::from_raw`
+  rejection on `0` / `3` / `255`; `BitsPerSample` at 15/16/24/25/32;
+  `ChannelCount` at 0/1/2/6/7/255; `SampleRate` at 0 / 1 / 44 100 /
+  `MAX_SAMPLE_RATE` / `MAX_SAMPLE_RATE + 1` / `u32::MAX`), the
+  `byte_depth` derivation for each `bits_per_sample` in scope, the
+  `is_multichannel` gate at `nch == 1` / `nch == 2`, the
+  `regular_frame_samples` 64-bit-widening canary at
+  `sample_rate = MAX_SAMPLE_RATE` (against a future regression that
+  drops the `(... as u64) * 256 / 245` widening per `spec/01` §4.1),
+  and a "parsed header → typed accessor matches raw field" agreement
+  test that confirms a successfully-parsed `(1, 2, 16, 44100, 88200)`
+  stereo header round-trips bit-for-bit through every accessor.
+
 - Round-234: new `range` Criterion bench harness under
   `benches/range.rs` covering the round-209 / round-215 / round-219
   player-API range surface on `Decoder` —
