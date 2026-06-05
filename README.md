@@ -171,7 +171,7 @@ input to this rebuild.
   feature (off by default) and the `OXIDEAV_TTA_TRACE_FILE` env var
   per spec/06 §2. With both on, the decoder writes one TSV event
   line per state transition (18-event vocabulary) suitable for
-  lockstep diff against a libtta-instrumented tape via
+  lockstep diff against a reference-instrumented tape via
   `docs/audio/tta-cleanroom/tools/tta-diff/`. Zero overhead when
   the feature is off.
 - **`oxideav-core` framework integration**: default-on `registry`
@@ -235,8 +235,7 @@ input to this rebuild.
   is host-app territory per spec §7. Bogus APE `tag_size` values
   that would overrun the post-stream region are rejected silently
   (the trailer is treated as "not present" rather than as a parse
-  error, mirroring libtta's silent passthrough behaviour for
-  trailers).
+  error; spec §7 specifies host-app passthrough for trailers).
 
 ## What round 5 adds on top
 
