@@ -8,6 +8,43 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-243: typed accessor for the `StreamHeader::total_samples`
+  sub-field per `spec/01` §3.4 — the remaining raw `u32` after the
+  round-240 four-sub-field lift. New public newtype `TotalSamples`
+  (`from_raw` is infallible because every `u32` is structurally legal
+  per spec §3.4 — zero is permitted as a valid empty-stream marker),
+  carrying `count()`, `is_empty()`, and `duration_at(sample_rate)` that
+  computes the playback length in `core::time::Duration` using the
+  same nanosecond-grain integer arithmetic as
+  `Decoder::total_duration` (`floor(remainder * 1e9 / sample_rate)`
+  with a `u128`-widened intermediate to avoid overflow at the upper
+  end of the `(total_samples = u32::MAX, sample_rate = 0x7FFFFF)`
+  envelope). `StreamHeader` gains `total_samples_typed()` (the
+  infallible projection) plus a `total_duration()` convenience that
+  threads through the typed accessor — the latter is the
+  header-side mirror of `Decoder::total_duration`, reachable without
+  constructing a full `Decoder` (e.g. for a player UI that wants to
+  display the stream duration before committing to a decode). Five
+  new unit tests pin the boundary cases (`TotalSamples` at `0` /
+  `44_100` / `u32::MAX`; `duration_at` at exact 1 s / zero samples /
+  zero rate / 0.5 s sub-second precision; the upper-bound envelope
+  `(total_samples = u32::MAX, sample_rate = MAX_SAMPLE_RATE)` against
+  a future regression that drops the `u128` widening; the
+  parsed-header round-trip on `(1, 2, 16, 48_000, 96_000)` confirming
+  the typed accessor count matches the raw field and the convenience
+  `total_duration` matches the typed `duration_at(sample_rate)` call;
+  the zero-payload header at `total_samples = 0` confirming both the
+  typed accessor's `is_empty` flag and the zero duration round-trip).
+  One new integration test in `roundtrip_tests` confirms cross-API
+  agreement: for every shape in a six-case parameter grid (exact 1 s
+  / 2.5 s / 3 s at the typical rates, single-sample at 192 kHz, 1 s
+  plus one sample at 44.1 kHz, and an empty-stream literal), the
+  header-level `StreamHeader::total_duration`,
+  the typed `TotalSamples::duration_at(sample_rate)`, and the
+  decoder-level `Decoder::total_duration` agree bit-for-bit. Raw
+  `u32` field on `StreamHeader` is kept for backward compatibility;
+  the typed accessor is purely additive.
+
 - Round-240: typed accessors for the four constrained `StreamHeader`
   sub-fields per `spec/01` §3.1 / §3.2 / §3.3. New public items
   `Format` (non-exhaustive enum with `Simple` / `Encrypted` variants

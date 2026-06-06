@@ -559,3 +559,43 @@ Run locally with `cargo bench -p oxideav-tta --bench <decode|encode|roundtrip|st
   of every range plus the parser-to-typed-accessor agreement on a
   44.1 kHz stereo 16-bit fixture. Lib tests: 140 (default features)
   / 145 (all-features) / 131 (no-default-features).
+
+## What round 243 adds on top
+
+- **Typed accessor for `StreamHeader::total_samples`** per
+  `spec/01` §3.4 — the remaining raw `u32` on `StreamHeader` after
+  the round-240 four-sub-field lift. New public newtype
+  [`TotalSamples`](src/header.rs) (`from_raw` is infallible because
+  every `u32` is structurally legal per spec §3.4 — zero is the
+  documented empty-stream marker), carrying `count()`, `is_empty()`,
+  and a `duration_at(sample_rate)` projection that returns the
+  playback length in `core::time::Duration` using nanosecond-grain
+  integer arithmetic identical to `Decoder::total_duration`
+  (`floor(remainder * 1e9 / sample_rate)` with a `u128`-widened
+  intermediate to stay overflow-free across the full
+  `(total_samples = u32::MAX, sample_rate = 0x7FFFFF)` envelope).
+  `StreamHeader` gains `total_samples_typed()` (the infallible
+  projection) and a `total_duration()` convenience that threads
+  through it — the header-side mirror of `Decoder::total_duration`,
+  reachable without constructing a full `Decoder` (e.g. for a player
+  UI that wants to display the stream duration before committing to
+  a decode). Five new unit tests pin the boundary cases
+  (`TotalSamples` at `0` / `44_100` / `u32::MAX`; `duration_at` at
+  exact 1 s / zero samples / zero rate / 0.5 s sub-second precision;
+  the upper-bound envelope `(u32::MAX, MAX_SAMPLE_RATE)` against a
+  future regression that drops the `u128` widening; the
+  parsed-header round-trip on `(1, 2, 16, 48_000, 96_000)` confirming
+  the typed accessor matches the raw field and the convenience
+  `total_duration` matches the typed `duration_at(sample_rate)` call;
+  the zero-payload header at `total_samples = 0` confirming both the
+  typed accessor's `is_empty` flag and the zero-duration round-trip).
+  One new integration test in `roundtrip_tests` confirms cross-API
+  agreement: for every shape in a six-case parameter grid (exact 1 s
+  / 2.5 s / 3 s at the typical rates, a single sample at 192 kHz, 1 s
+  plus one sample at 44.1 kHz, and an empty-stream literal), the
+  header-level `StreamHeader::total_duration`, the typed
+  `TotalSamples::duration_at(sample_rate)`, and the decoder-level
+  `Decoder::total_duration` agree bit-for-bit. The raw `u32` field on
+  `StreamHeader` is kept for backward compatibility; the typed
+  accessor is purely additive. Lib tests: 146 (default features) /
+  151 (all-features) / 137 (no-default-features).

@@ -1544,6 +1544,64 @@ fn total_duration_matches_total_samples_over_sample_rate() {
 }
 
 #[test]
+fn header_total_duration_matches_decoder_total_duration() {
+    // The header-level `StreamHeader::total_duration` shortcut and the
+    // `TotalSamples::duration_at(sample_rate)` typed-accessor entry
+    // point must agree bit-for-bit with the `Decoder::total_duration`
+    // computation across the typical stream shapes — the integer
+    // arithmetic on both sides is identical, so any divergence here
+    // would be a regression on the typed-accessor projection.
+    let cases: &[(u32, u16, u32)] = &[
+        // (total_samples, channels, sample_rate)
+        (44_100, 1, 44_100),     // exact 1 s mono 44.1k
+        (110_250, 2, 44_100),    // 2.5 s stereo 44.1k
+        (48_000 * 3, 1, 48_000), // 3 s mono 48k
+        (44_101, 1, 44_100),     // 1 s + 1 sample → sub-second remainder
+        (1, 1, 192_000),         // single sample at 192k
+        (0, 1, 44_100),          // empty stream — both sides → ZERO
+    ];
+    for &(total_samples, channels, sample_rate) in cases {
+        if total_samples == 0 {
+            // Empty-stream path: skip the encode (the encoder would
+            // produce a zero-frame stream which is structurally valid
+            // but the existing encode entry rejects zero-sample input
+            // via `InvalidSampleBuffer`). Instead, hand-construct the
+            // header literal and exercise just the typed accessor.
+            let h = crate::StreamHeader {
+                format: 1,
+                channels,
+                bits_per_sample: 16,
+                sample_rate,
+                total_samples,
+            };
+            assert_eq!(h.total_duration(), core::time::Duration::ZERO);
+            assert!(h.total_samples_typed().is_empty());
+            continue;
+        }
+        let samples = pseudo_noise(
+            total_samples as usize,
+            channels,
+            0x7FFF,
+            0x1234_5678_u64.wrapping_mul(total_samples as u64),
+        );
+        let tta = encode(&samples, channels, 16, sample_rate).expect("encode");
+        let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+        let header_duration = dec.header.total_duration();
+        let typed_duration = dec
+            .header
+            .total_samples_typed()
+            .duration_at(dec.header.sample_rate);
+        assert_eq!(header_duration, dec.total_duration());
+        assert_eq!(typed_duration, dec.total_duration());
+        // Round-trip the raw field via the typed accessor.
+        assert_eq!(
+            dec.header.total_samples_typed().count(),
+            dec.header.total_samples
+        );
+    }
+}
+
+#[test]
 fn seek_to_time_zero_lands_at_first_sample() {
     use core::time::Duration;
     let samples = pseudo_noise(44_100, 1, 0x7FFF, 0xAACC_DDEE);

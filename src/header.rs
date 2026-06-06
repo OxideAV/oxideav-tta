@@ -170,6 +170,92 @@ impl SampleRate {
     }
 }
 
+/// Typed wrapper around the `total_samples` field per `spec/01` §3.4 —
+/// the per-channel sample count of the audio payload (the same number
+/// a WAV `fact` chunk would record for a non-PCM transcode).
+///
+/// The entire `u32` value space is structurally legal per spec §3.4
+/// ("a `total_samples` of zero is structurally valid; no frames
+/// follow"), so [`TotalSamples::from_raw`] is infallible. The newtype
+/// exists for two reasons:
+///
+/// 1. **Symmetry with the round-240 typed sub-field accessors.** Once
+///    [`Format`] / [`BitsPerSample`] / [`ChannelCount`] / [`SampleRate`]
+///    exist alongside [`StreamHeader`]'s raw fields, callers that want
+///    to thread the parsed payload-size separately from the rest of the
+///    header benefit from the same self-documenting wrapper rather than
+///    a bare `u32`.
+///
+/// 2. **Duration computation per `spec/01` §3.4.** A caller with a
+///    `(total_samples, sample_rate)` pair can compute the stream's
+///    playback length in `core::time::Duration` directly via
+///    [`TotalSamples::duration_at`], without going through a full
+///    [`crate::Decoder`] construction. The arithmetic matches the
+///    sample-keyed → `Duration` conversion used by
+///    [`crate::Decoder::total_duration`] / `seek_to_time` so any caller
+///    deriving one outside the decoder and one inside agrees bit-for-bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TotalSamples(u32);
+
+impl TotalSamples {
+    /// Lift a raw `u32` into the typed accessor. Every `u32` value is
+    /// in scope per `spec/01` §3.4 (zero is structurally valid; the
+    /// upper bound is just the field width), so this never fails — the
+    /// `from_raw` shape is retained for symmetry with the other typed
+    /// accessors and to give a single discoverable entry point.
+    pub fn from_raw(value: u32) -> Self {
+        TotalSamples(value)
+    }
+
+    /// Underlying per-channel sample count (the on-wire `total_samples`
+    /// value verbatim).
+    pub fn count(&self) -> u32 {
+        self.0
+    }
+
+    /// `true` for a structurally-empty stream (`total_samples == 0`).
+    /// Per `spec/01` §3.4 this is a valid TTA1 file with zero
+    /// frames following the seek table — the codec construction is
+    /// well-defined; no PCM is produced.
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+
+    /// Playback duration at `sample_rate` Hz, using nanosecond-grain
+    /// integer arithmetic so the result is exact and overflow-free for
+    /// the entire in-scope envelope (`sample_rate ≤ 0x7FFFFF`,
+    /// `total_samples ≤ u32::MAX`).
+    ///
+    /// The formula is `total_samples / sample_rate` seconds plus
+    /// `floor((total_samples mod sample_rate) * 1_000_000_000 /
+    /// sample_rate)` nanoseconds, matching the
+    /// [`crate::Decoder::total_duration`] internal arithmetic so a
+    /// caller that derives one outside the decoder agrees bit-for-bit
+    /// with the decoder-internal computation.
+    ///
+    /// `sample_rate == 0` returns [`core::time::Duration::ZERO`] (no
+    /// division by zero; not a structurally legal stream — `sample_rate
+    /// == 0` is rejected by [`parse_stream_header`] — but the accessor
+    /// stays total).
+    pub fn duration_at(&self, sample_rate: u32) -> core::time::Duration {
+        if sample_rate == 0 {
+            return core::time::Duration::ZERO;
+        }
+        let n = self.0 as u64;
+        let r = sample_rate as u64;
+        let secs = n / r;
+        let remainder = n % r;
+        // Sub-second component in nanoseconds: floor(remainder * 1e9 /
+        // sample_rate). Widened to u128 so the multiplication cannot
+        // overflow — `remainder < sample_rate ≤ 0x7FFFFF` and the
+        // product stays well under `u128::MAX`. The widening is a
+        // defensive cost-free belt-and-braces against a future
+        // sample-rate-ceiling lift.
+        let ns = ((remainder as u128) * 1_000_000_000u128 / (r as u128)) as u64;
+        core::time::Duration::new(secs, ns as u32)
+    }
+}
+
 /// Parsed TTA1 stream header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamHeader {
@@ -248,6 +334,32 @@ impl StreamHeader {
     /// `Result` discipline as [`Self::format_typed`].
     pub fn sample_rate_typed(&self) -> Result<SampleRate> {
         SampleRate::from_raw(self.sample_rate)
+    }
+
+    /// Lifts the raw `total_samples` field into the typed
+    /// [`TotalSamples`] accessor per `spec/01` §3.4.
+    ///
+    /// Every `u32` value is structurally legal per the spec (zero is
+    /// permitted; the upper bound is just the field width), so this is
+    /// an infallible projection. It is provided alongside the other
+    /// `*_typed` accessors so callers reach for `header.total_samples_typed()`
+    /// rather than the bare `header.total_samples` field whenever they
+    /// want to thread the payload size + its derived duration through
+    /// a player API without going through a full [`crate::Decoder`].
+    pub fn total_samples_typed(&self) -> TotalSamples {
+        TotalSamples::from_raw(self.total_samples)
+    }
+
+    /// Convenience: playback duration at the parsed `sample_rate` using
+    /// the same nanosecond-grain integer arithmetic as
+    /// [`crate::Decoder::total_duration`]. Returns
+    /// [`core::time::Duration::ZERO`] for `sample_rate == 0` (rejected
+    /// by [`parse_stream_header`]; the accessor stays total for ad-hoc
+    /// `StreamHeader` literals used in encode tests).
+    ///
+    /// Equivalent to `self.total_samples_typed().duration_at(self.sample_rate)`.
+    pub fn total_duration(&self) -> core::time::Duration {
+        self.total_samples_typed().duration_at(self.sample_rate)
     }
 }
 
@@ -680,6 +792,97 @@ mod tests {
             SampleRate::from_raw(u32::MAX),
             Err(Error::UnsupportedSampleRate(_))
         ));
+    }
+
+    #[test]
+    fn total_samples_typed_boundary() {
+        // Zero is structurally valid per spec §3.4.
+        let z = TotalSamples::from_raw(0);
+        assert_eq!(z.count(), 0);
+        assert!(z.is_empty());
+        // Max u32 value remains in scope (the upper bound is just the
+        // field width per spec §3.4).
+        let mx = TotalSamples::from_raw(u32::MAX);
+        assert_eq!(mx.count(), u32::MAX);
+        assert!(!mx.is_empty());
+        // Mid-range value round-trips cleanly.
+        let mid = TotalSamples::from_raw(44_100);
+        assert_eq!(mid.count(), 44_100);
+        assert!(!mid.is_empty());
+    }
+
+    #[test]
+    fn total_samples_typed_duration_at_44100() {
+        // 1 second at 44.1k.
+        let one_sec = TotalSamples::from_raw(44_100);
+        assert_eq!(
+            one_sec.duration_at(44_100),
+            core::time::Duration::from_secs(1)
+        );
+        // Zero samples → zero duration.
+        let zero = TotalSamples::from_raw(0);
+        assert_eq!(zero.duration_at(44_100), core::time::Duration::ZERO);
+        // Zero rate → zero duration (no division by zero).
+        assert_eq!(
+            TotalSamples::from_raw(44_100).duration_at(0),
+            core::time::Duration::ZERO
+        );
+        // Sub-second precision: 22_050 samples at 44.1k = 0.5s = 500ms
+        // = 500_000_000 ns.
+        let half = TotalSamples::from_raw(22_050);
+        let d = half.duration_at(44_100);
+        assert_eq!(d.as_secs(), 0);
+        assert_eq!(d.subsec_nanos(), 500_000_000);
+    }
+
+    #[test]
+    fn total_samples_typed_duration_at_envelope_upper_bound() {
+        // Envelope: total_samples = u32::MAX, sample_rate = 0x7FFFFF.
+        // The arithmetic must not overflow and must produce a sensible
+        // duration. The expected value: secs = u32::MAX / 0x7FFFFF =
+        // 511 (integer), remainder = u32::MAX mod 0x7FFFFF =
+        // 0x7FFFFF * 512 - 1 - 0x7FFFFF * 511 = 0x7FFFFE, so the
+        // nanoseconds component is floor(0x7FFFFE * 1e9 / 0x7FFFFF) =
+        // 999_999_880.
+        let mx = TotalSamples::from_raw(u32::MAX);
+        let d = mx.duration_at(MAX_SAMPLE_RATE);
+        let expected_secs = (u32::MAX as u64) / (MAX_SAMPLE_RATE as u64);
+        let expected_remainder = (u32::MAX as u64) % (MAX_SAMPLE_RATE as u64);
+        let expected_ns =
+            ((expected_remainder as u128) * 1_000_000_000u128 / (MAX_SAMPLE_RATE as u128)) as u64;
+        assert_eq!(d.as_secs(), expected_secs);
+        assert_eq!(d.subsec_nanos(), expected_ns as u32);
+    }
+
+    #[test]
+    fn stream_header_total_samples_typed_round_trip() {
+        // The lifting method returns the same value the raw field
+        // carries; the convenience `total_duration` agrees with the
+        // typed accessor's `duration_at(self.sample_rate)`.
+        let buf = build_header_bytes(1, 2, 16, 48_000, 96_000);
+        let (h, _) = parse_stream_header(&buf).unwrap();
+        let typed = h.total_samples_typed();
+        assert_eq!(typed.count(), h.total_samples);
+        assert_eq!(typed.count(), 96_000);
+        assert!(!typed.is_empty());
+        // 96_000 samples at 48 kHz = 2 seconds exactly.
+        let d = h.total_duration();
+        assert_eq!(d, core::time::Duration::from_secs(2));
+        assert_eq!(d, typed.duration_at(h.sample_rate));
+    }
+
+    #[test]
+    fn stream_header_total_samples_typed_zero_payload() {
+        // `total_samples = 0` is structurally valid per spec §3.4 —
+        // both the accessor and the parser accept it; the duration is
+        // zero.
+        let buf = build_header_bytes(1, 1, 16, 44_100, 0);
+        let (h, _) = parse_stream_header(&buf).unwrap();
+        assert_eq!(h.total_samples_typed().count(), 0);
+        assert!(h.total_samples_typed().is_empty());
+        assert_eq!(h.total_duration(), core::time::Duration::ZERO);
+        // Frame geometry is also (0, 0) for an empty stream.
+        assert_eq!(h.frame_geometry(), (0, 0));
     }
 
     #[test]
