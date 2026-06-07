@@ -599,3 +599,44 @@ Run locally with `cargo bench -p oxideav-tta --bench <decode|encode|roundtrip|st
   `StreamHeader` is kept for backward compatibility; the typed
   accessor is purely additive. Lib tests: 146 (default features) /
   151 (all-features) / 137 (no-default-features).
+
+## What round 246 adds on top
+
+- **Typed sub-field accessors** for the two constrained
+  [`FrameDescriptor`](src/header.rs) fields per `spec/01` §4.2 / §5.1
+  / §5.5. The raw `disk_size: u32` and `sample_count: u32` fields are
+  kept as the on-wire data model, but consumers that want to branch on
+  the spec's documented frame-layout invariants can now lift each
+  field into a validated typed accessor:
+  - [`FrameByteLength`](src/header.rs) — newtype validated against the
+    `>= 4` minimum per `spec/01` §5.1 (the smallest legal on-disk frame
+    block is an empty body followed by the four trailing CRC bytes).
+    Carries `total_size()` (the seek-table-entry value verbatim) and
+    `body_size()` (= `total_size - 4`, safe subtraction by construction
+    rather than `saturating_sub` as on the raw
+    `FrameDescriptor::body_size`).
+  - [`FrameSampleCount`](src/header.rs) — newtype validated against
+    the `>= 1` minimum per `spec/01` §4.1 / §5.5 (every
+    parser-produced descriptor describes at least one sample; the
+    empty-stream case produces zero descriptors instead). Carries
+    `count()` and `is_within_regular_bound(regular)`, the
+    `<= floor(sample_rate * 256 / 245)` regular-frame ceiling gate of
+    `spec/01` §4.1 / §5.5.
+  `FrameDescriptor` gains two matching `Result`-returning lifting
+  accessors (`disk_size_typed` / `sample_count_typed`). Two new
+  `Error` variants — `InvalidFrameByteLength(u32)` and
+  `InvalidFrameSampleCount(u32)` — surface the rejection at lift time
+  so an ad-hoc `FrameDescriptor` literal (e.g. an encode-side fixture)
+  gets the same discipline the per-frame decoder hot path enforces.
+  Five new unit tests pin the boundary cases plus a three-frame parsed
+  seek-table cross-check; one new integration test in
+  `roundtrip_tests` confirms cross-API agreement on three independent
+  encoded multi-frame stream shapes — mono 16-bit @ 44.1k / 2.5 s
+  (three frames: `regular`, `regular`, shorter-last), stereo 16-bit @
+  48k / 2 s (two regular via the exact-multiple case), mono 24-bit @
+  44.1k / 1 s (single shorter-last) — every descriptor's typed lift
+  agrees bit-for-bit with its raw field and every frame's sample count
+  satisfies the regular-bound gate with the expected per-frame split
+  from `header.frame_geometry()`. Lib tests: 152 (default features) /
+  157 (all-features) / 143 (no-default-features). Integration tests
+  unchanged at 9.

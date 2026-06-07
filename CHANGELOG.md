@@ -8,6 +8,45 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-246: typed accessors for the two constrained `FrameDescriptor`
+  sub-fields per `spec/01` §4.2 / §5.1 / §5.5. New public newtypes
+  `FrameByteLength` (validated `>= 4` per `spec/01` §5.1 — the minimum
+  on-disk frame footprint that still has room for the trailing
+  per-frame CRC32; carries `total_size()` and `body_size()` derived as
+  `total_size - 4`, where the subtraction is safe by construction
+  rather than `saturating_sub` as on the raw `FrameDescriptor::body_size`)
+  and `FrameSampleCount` (validated `>= 1` per `spec/01` §4.1 / §5.5 —
+  every parser-produced descriptor describes at least one sample, with
+  the empty-stream `total_samples = 0` case producing zero descriptors
+  instead; carries `count()` and `is_within_regular_bound(regular)`,
+  the `<= floor(sample_rate * 256 / 245)` regular-frame ceiling gate of
+  `spec/01` §4.1 / §5.5). Two new `Error` variants —
+  `InvalidFrameByteLength(u32)` and `InvalidFrameSampleCount(u32)` —
+  surface the rejection at lift time so an ad-hoc `FrameDescriptor`
+  literal (e.g. an encode-side fixture) gets the same discipline the
+  per-frame decoder hot path enforces (`decode_frame` already rejects
+  `disk_size < 4` with `Error::Truncated`). `FrameDescriptor` gains
+  `disk_size_typed()` and `sample_count_typed()` (each returning a
+  `Result`) — the raw `u32` fields are kept for backward compatibility;
+  the typed accessors are purely additive. Five new unit tests pin the
+  boundary cases at each end of every range (`FrameByteLength` at `0` /
+  `1` / `3` / `4` / `22_189` / `u32::MAX`; `FrameSampleCount` at `0` /
+  `1` / `46_080` / `u32::MAX`; the regular-bound gate at the boundary
+  `46_080` versus `46_081` derived for `sample_rate = 44_100`), the
+  ad-hoc `FrameDescriptor` round-trip on the canonical-fixture
+  `(disk_size = 22_189, sample_count = 44_100)` shape from
+  `spec/01` §8.1, and the end-to-end agreement on a parsed three-frame
+  seek table for a 2.5 s @ 44.1 kHz stream. One new integration test in
+  `roundtrip_tests` confirms cross-API agreement on a real encoded
+  multi-frame stream: for every shape in a three-case parameter grid
+  (mono 16-bit @ 44.1k 2.5 s producing three frames `(regular, regular,
+  shorter-last)`, stereo 16-bit @ 48k 2 s producing two regular frames
+  via the exact-multiple case, mono 24-bit @ 44.1k 1 s producing a
+  single shorter-last frame), every descriptor's typed `disk_size_typed`
+  / `sample_count_typed` lift agrees bit-for-bit with the raw field it
+  lifts and every frame's sample count satisfies the regular-bound gate
+  with the expected per-frame split from `header.frame_geometry()`.
+
 - Round-243: typed accessor for the `StreamHeader::total_samples`
   sub-field per `spec/01` §3.4 — the remaining raw `u32` after the
   round-240 four-sub-field lift. New public newtype `TotalSamples`

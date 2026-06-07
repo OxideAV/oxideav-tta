@@ -363,6 +363,98 @@ impl StreamHeader {
     }
 }
 
+/// Typed wrapper around a [`FrameDescriptor`]'s `disk_size` field —
+/// the total on-disk byte footprint of one frame's data block per
+/// `spec/01` §4.2 (the seek-table entry value verbatim, including the
+/// trailing 4-byte per-frame CRC of `spec/01` §5.1).
+///
+/// Validated against `>= 4`: every on-disk frame block is `body || u32
+/// CRC`, so the minimum legal entry is exactly 4 bytes (an empty body
+/// followed by the four CRC bytes). The per-frame decoder enforces the
+/// same lower bound at `decode_frame` entry — the typed accessor
+/// surfaces that invariant at the seek-table layer so a caller that
+/// constructs a [`FrameDescriptor`] literal (e.g. an ad-hoc encoder
+/// fixture) gets the same `Error::InvalidFrameByteLength` discipline
+/// the decoder hot path produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FrameByteLength(u32);
+
+impl FrameByteLength {
+    /// Lift a raw `u32` into the typed accessor. Returns
+    /// [`Error::InvalidFrameByteLength`] for any value below `4` —
+    /// the minimum size required to hold the trailing per-frame CRC
+    /// per `spec/01` §5.1. Every value `>= 4` is structurally legal
+    /// per spec §4.2 (the entropy-coded body's byte budget is whatever
+    /// the encoder produced; the spec imposes no upper bound).
+    pub fn from_raw(value: u32) -> Result<Self> {
+        if value < 4 {
+            Err(Error::InvalidFrameByteLength(value))
+        } else {
+            Ok(FrameByteLength(value))
+        }
+    }
+
+    /// Total on-disk byte footprint of the frame, including the
+    /// trailing 4-byte CRC (`spec/01` §4.2 — the seek-table entry's
+    /// value verbatim).
+    pub fn total_size(&self) -> u32 {
+        self.0
+    }
+
+    /// Bytes of bit-packed entropy-coded body (= `total_size - 4` per
+    /// `spec/01` §5.1, where the four trailing bytes are the per-frame
+    /// IEEE-802.3 CRC32). Always strictly less than [`Self::total_size`]
+    /// (subtraction is safe because `total_size >= 4` by construction).
+    pub fn body_size(&self) -> u32 {
+        self.0 - 4
+    }
+}
+
+/// Typed wrapper around a [`FrameDescriptor`]'s `sample_count` field —
+/// the per-channel sample count to reconstruct from this frame's body
+/// per `spec/01` §5.5.
+///
+/// Validated against `>= 1`: every frame descriptor produced by the
+/// parser describes at least one sample per `spec/01` §4.1 / §5.5.
+/// The empty-stream case (`total_samples = 0` per spec §3.4) produces
+/// zero frame descriptors instead — so a descriptor carrying
+/// `sample_count = 0` is structurally impossible per spec and is
+/// rejected by the typed accessor with [`Error::InvalidFrameSampleCount`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FrameSampleCount(u32);
+
+impl FrameSampleCount {
+    /// Lift a raw `u32` into the typed accessor. Returns
+    /// [`Error::InvalidFrameSampleCount`] for `0` per `spec/01` §4.1 /
+    /// §5.5. Every non-zero value `u32` is in scope (the upper bound is
+    /// just the field width; the documented practical ceiling is the
+    /// `floor(sample_rate * 256 / 245)` regular-frame count of `spec/01`
+    /// §4.1 — checked by [`Self::is_within_regular_bound`]).
+    pub fn from_raw(value: u32) -> Result<Self> {
+        if value == 0 {
+            Err(Error::InvalidFrameSampleCount(value))
+        } else {
+            Ok(FrameSampleCount(value))
+        }
+    }
+
+    /// Per-channel sample count carried by this frame (`>= 1`).
+    pub fn count(&self) -> u32 {
+        self.0
+    }
+
+    /// `true` when the count is `<=` the regular per-frame sample count
+    /// derived from the stream's `sample_rate` per `spec/01` §4.1 /
+    /// §5.5. The regular-frame ceiling caps every frame's per-channel
+    /// sample count; only the last frame may be shorter and never
+    /// longer. Convenience for callers that want to sanity-check an
+    /// ad-hoc [`FrameDescriptor`] literal against the spec's frame-
+    /// geometry rule without re-deriving the regular count themselves.
+    pub fn is_within_regular_bound(&self, regular_frame_samples: u32) -> bool {
+        self.0 <= regular_frame_samples
+    }
+}
+
 /// One frame's location in the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameDescriptor {
@@ -384,6 +476,34 @@ impl FrameDescriptor {
     /// 4-byte CRC).
     pub fn body_size(&self) -> u32 {
         self.disk_size.saturating_sub(4)
+    }
+
+    /// Lifts the raw `disk_size` field into the typed
+    /// [`FrameByteLength`] accessor per `spec/01` §4.2 / §5.1
+    /// (validates `>= 4` so the trailing CRC fits).
+    ///
+    /// A successfully-parsed descriptor is guaranteed to satisfy the
+    /// `>= 4` bound because the per-frame decoder rejects any
+    /// shorter entry at `decode_frame` entry; the accessor returns a
+    /// `Result` rather than an infallible projection so an ad-hoc
+    /// [`FrameDescriptor`] literal constructed by a caller (e.g. an
+    /// encode-side fixture) gets the same
+    /// [`Error::InvalidFrameByteLength`] discipline.
+    pub fn disk_size_typed(&self) -> Result<FrameByteLength> {
+        FrameByteLength::from_raw(self.disk_size)
+    }
+
+    /// Lifts the raw `sample_count` field into the typed
+    /// [`FrameSampleCount`] accessor per `spec/01` §4.1 / §5.5
+    /// (validates `>= 1`).
+    ///
+    /// A successfully-parsed descriptor is guaranteed to satisfy the
+    /// `>= 1` bound because every parser-produced descriptor describes
+    /// at least one sample (the empty-stream case produces zero
+    /// descriptors instead). Same `Result` discipline as
+    /// [`Self::disk_size_typed`] for the ad-hoc-literal path.
+    pub fn sample_count_typed(&self) -> Result<FrameSampleCount> {
+        FrameSampleCount::from_raw(self.sample_count)
     }
 }
 
@@ -918,6 +1038,177 @@ mod tests {
             bogus.channel_count_typed(),
             Err(Error::UnsupportedChannelCount(0))
         ));
+    }
+
+    #[test]
+    fn frame_byte_length_typed_boundary() {
+        // 4 is the minimum legal value (empty body + 4-byte CRC).
+        let m = FrameByteLength::from_raw(4).unwrap();
+        assert_eq!(m.total_size(), 4);
+        assert_eq!(m.body_size(), 0);
+        // Mid-range value round-trips cleanly.
+        let mid = FrameByteLength::from_raw(22_189).unwrap();
+        assert_eq!(mid.total_size(), 22_189);
+        assert_eq!(mid.body_size(), 22_185);
+        // u32::MAX is in scope per spec §4.2 (no upper bound on entry
+        // size); the body_size derivation must not overflow.
+        let mx = FrameByteLength::from_raw(u32::MAX).unwrap();
+        assert_eq!(mx.total_size(), u32::MAX);
+        assert_eq!(mx.body_size(), u32::MAX - 4);
+        // Values below 4 are rejected.
+        assert!(matches!(
+            FrameByteLength::from_raw(0),
+            Err(Error::InvalidFrameByteLength(0))
+        ));
+        assert!(matches!(
+            FrameByteLength::from_raw(1),
+            Err(Error::InvalidFrameByteLength(1))
+        ));
+        assert!(matches!(
+            FrameByteLength::from_raw(3),
+            Err(Error::InvalidFrameByteLength(3))
+        ));
+    }
+
+    #[test]
+    fn frame_sample_count_typed_boundary() {
+        // 1 is the minimum legal value per spec/01 §4.1 / §5.5.
+        let one = FrameSampleCount::from_raw(1).unwrap();
+        assert_eq!(one.count(), 1);
+        // Mid-range value round-trips cleanly.
+        let mid = FrameSampleCount::from_raw(46_080).unwrap();
+        assert_eq!(mid.count(), 46_080);
+        // u32::MAX is in scope (the upper bound is the field width).
+        let mx = FrameSampleCount::from_raw(u32::MAX).unwrap();
+        assert_eq!(mx.count(), u32::MAX);
+        // Zero is rejected.
+        assert!(matches!(
+            FrameSampleCount::from_raw(0),
+            Err(Error::InvalidFrameSampleCount(0))
+        ));
+    }
+
+    #[test]
+    fn frame_sample_count_typed_regular_bound() {
+        // At 44.1 kHz the regular per-frame count is
+        // floor(44_100 * 256 / 245) = 46_080. Any frame's
+        // per-channel count must be <= that to be a legal regular
+        // frame; the last frame is the only one allowed to be shorter.
+        let regular = 46_080u32;
+        // Below or at the cap: in-bound.
+        assert!(FrameSampleCount::from_raw(1)
+            .unwrap()
+            .is_within_regular_bound(regular));
+        assert!(FrameSampleCount::from_raw(regular)
+            .unwrap()
+            .is_within_regular_bound(regular));
+        // Above the cap: out of bound (cannot be a legal frame at
+        // this sample rate).
+        assert!(!FrameSampleCount::from_raw(regular + 1)
+            .unwrap()
+            .is_within_regular_bound(regular));
+        assert!(!FrameSampleCount::from_raw(u32::MAX)
+            .unwrap()
+            .is_within_regular_bound(regular));
+    }
+
+    #[test]
+    fn frame_descriptor_typed_accessors_match_raw() {
+        // A FrameDescriptor produced by parse_seek_table on the
+        // 1-frame canonical fixture (`sine-440Hz-1ch-16bit-44100-1s`)
+        // carries disk_size = 22_189 (per spec/01 §8.1 cross-validation)
+        // and sample_count = 44_100. Synthesise it directly and check
+        // every typed accessor agrees with the raw field it lifts.
+        let fd = FrameDescriptor {
+            file_offset: 30,
+            disk_size: 22_189,
+            sample_count: 44_100,
+            is_last: true,
+        };
+        let len = fd.disk_size_typed().unwrap();
+        assert_eq!(len.total_size(), fd.disk_size);
+        assert_eq!(len.body_size(), fd.body_size());
+        let sc = fd.sample_count_typed().unwrap();
+        assert_eq!(sc.count(), fd.sample_count);
+        // At sample_rate = 44_100, regular = 46_080; the descriptor's
+        // 44_100 samples fit (it's the last frame of a 1-frame stream
+        // that happens to be shorter than regular).
+        assert!(sc.is_within_regular_bound(46_080));
+
+        // A constructed-by-hand descriptor with a now-rejected raw
+        // disk_size round-trips back through the typed accessor as the
+        // same error variant the decoder hot path would have produced.
+        let bogus_len = FrameDescriptor {
+            file_offset: 0,
+            disk_size: 3,
+            sample_count: 1,
+            is_last: true,
+        };
+        assert!(matches!(
+            bogus_len.disk_size_typed(),
+            Err(Error::InvalidFrameByteLength(3))
+        ));
+
+        // A constructed-by-hand descriptor with sample_count = 0
+        // similarly surfaces the structurally-impossible value.
+        let bogus_sc = FrameDescriptor {
+            file_offset: 0,
+            disk_size: 4,
+            sample_count: 0,
+            is_last: true,
+        };
+        assert!(matches!(
+            bogus_sc.sample_count_typed(),
+            Err(Error::InvalidFrameSampleCount(0))
+        ));
+    }
+
+    #[test]
+    fn frame_descriptor_typed_accessors_round_trip_via_parse_seek_table() {
+        // End-to-end: parse a real seek table and confirm every parsed
+        // descriptor's typed accessors agree with the raw fields, and
+        // every descriptor's sample_count is within the regular-frame
+        // bound (every regular frame == regular_count; the last frame
+        // may be shorter).
+        // Build a header for a 2.5 s @ 44.1 kHz mono 16-bit stream:
+        // total_samples = 110_250, regular = 46_080 => 3 frames
+        // (46_080, 46_080, 18_090).
+        let buf = build_header_bytes(1, 1, 16, 44_100, 110_250);
+        let (h, _) = parse_stream_header(&buf).unwrap();
+        let regular = h.regular_frame_samples();
+        let (frame_count, last_samples) = h.frame_geometry();
+        assert_eq!(frame_count, 3);
+        assert_eq!(last_samples, 18_090);
+
+        // Synthesise a minimal seek table: three frame entries each
+        // with disk_size = 50 (an arbitrary >= 4 value) plus a CRC.
+        let mut sk_buf = Vec::with_capacity(16);
+        let entries = [50u32, 50, 50];
+        for e in &entries {
+            sk_buf.extend_from_slice(&e.to_le_bytes());
+        }
+        let sk_crc = crate::crc32::crc32(&sk_buf);
+        sk_buf.extend_from_slice(&sk_crc.to_le_bytes());
+        let (seek, _) = parse_seek_table(&sk_buf, &h, 30).unwrap();
+        assert!(seek.crc_ok);
+        assert_eq!(seek.frames.len(), 3);
+
+        for fd in &seek.frames {
+            // disk_size lift.
+            let len = fd.disk_size_typed().unwrap();
+            assert_eq!(len.total_size(), fd.disk_size);
+            assert_eq!(len.body_size(), fd.body_size());
+            // sample_count lift + regular-bound gate.
+            let sc = fd.sample_count_typed().unwrap();
+            assert_eq!(sc.count(), fd.sample_count);
+            assert!(sc.is_within_regular_bound(regular));
+        }
+
+        // The last descriptor's sample_count == last_samples (18_090);
+        // the other two carry regular (46_080).
+        assert_eq!(seek.frames[0].sample_count, regular);
+        assert_eq!(seek.frames[1].sample_count, regular);
+        assert_eq!(seek.frames[2].sample_count, last_samples);
     }
 
     #[test]

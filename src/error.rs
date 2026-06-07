@@ -44,6 +44,21 @@ pub enum Error {
     /// [`crate::Decoder::seek_to_sample`] was at or above the
     /// stream's `total_samples`.
     SampleIndexOutOfRange,
+    /// A seek-table entry / [`crate::FrameDescriptor`] carried a
+    /// `disk_size` smaller than 4 bytes, leaving no room for the
+    /// trailing per-frame CRC32 required by `spec/01` §5.1 (each
+    /// on-disk frame block is `body || u32 CRC`, so the minimum
+    /// legal entry is exactly 4 bytes — an empty body followed by
+    /// the four CRC bytes).
+    InvalidFrameByteLength(u32),
+    /// A seek-table entry / [`crate::FrameDescriptor`] carried a
+    /// per-channel `sample_count` of zero. Per `spec/01` §4.1 / §5.5
+    /// every frame descriptor produced by the parser describes at
+    /// least one sample (the empty-stream `total_samples = 0` case
+    /// produces zero frame descriptors instead), so the typed
+    /// accessor rejects the structurally-impossible zero value at
+    /// lift time rather than silently propagating it.
+    InvalidFrameSampleCount(u32),
 }
 
 impl core::fmt::Display for Error {
@@ -78,6 +93,18 @@ impl core::fmt::Display for Error {
             Error::FrameIndexOutOfRange => f.write_str("oxideav-tta: frame index out of range"),
             Error::SampleIndexOutOfRange => {
                 f.write_str("oxideav-tta: sample index at or above total_samples")
+            }
+            Error::InvalidFrameByteLength(v) => {
+                write!(
+                    f,
+                    "oxideav-tta: frame disk_size {v} is less than the 4-byte trailing CRC minimum"
+                )
+            }
+            Error::InvalidFrameSampleCount(v) => {
+                write!(
+                    f,
+                    "oxideav-tta: frame sample_count {v} is below the 1-sample-per-frame minimum"
+                )
             }
         }
     }

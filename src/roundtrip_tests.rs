@@ -2266,3 +2266,65 @@ fn decode_sample_range_format2_password_seek_and_clip_bit_exact() {
     let expected = &eager[(start as usize) * nch..(end as usize) * nch];
     assert_eq!(got, expected);
 }
+
+#[test]
+fn frame_descriptor_typed_accessors_match_parsed_stream() {
+    // End-to-end cross-API agreement on a real encoded multi-frame
+    // stream: parse it via Decoder::new and walk every frame
+    // descriptor confirming the typed accessors agree with the raw
+    // fields they lift AND that the spec-derived regular-frame bound
+    // (`spec/01` §4.1 — `floor(sample_rate * 256 / 245)`) holds for
+    // every frame's sample count (every regular frame == regular
+    // count; the last frame may be shorter).
+    //
+    // Three independent shapes pin different code paths:
+    //   - mono 16-bit @ 44.1k, 2.5 s   => 3 frames (regular,regular,last)
+    //   - stereo 16-bit @ 48k, 2 s     => 2 frames (exact-multiple => both regular)
+    //   - mono 24-bit @ 44.1k, 1 s     => 1 frame (last == only)
+    let cases: &[(u32, u16, u16, u32)] = &[
+        // (total_samples, channels, bits_per_sample, sample_rate)
+        (110_250, 1, 16, 44_100),
+        (96_000, 2, 16, 48_000),
+        (44_100, 1, 24, 44_100),
+    ];
+    for &(total_samples, channels, bits_per_sample, sample_rate) in cases {
+        let samples = pseudo_noise(
+            total_samples as usize,
+            channels,
+            (1i32 << (bits_per_sample - 1)) - 1,
+            0xC0FF_EE00u64.wrapping_mul(total_samples as u64),
+        );
+        let tta = encode(&samples, channels, bits_per_sample, sample_rate).expect("encode");
+        let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+        let regular = dec.header.regular_frame_samples();
+        let (expected_frame_count, expected_last_samples) = dec.header.frame_geometry();
+        assert_eq!(dec.frames.len() as u32, expected_frame_count);
+
+        for (idx, fd) in dec.frames.iter().enumerate() {
+            // disk_size lift round-trips.
+            let len = fd.disk_size_typed().expect("disk_size_typed");
+            assert_eq!(len.total_size(), fd.disk_size);
+            assert_eq!(len.body_size(), fd.body_size());
+            assert!(len.total_size() >= 4, "disk_size_typed enforces >= 4");
+
+            // sample_count lift round-trips and respects the
+            // regular-frame ceiling.
+            let sc = fd.sample_count_typed().expect("sample_count_typed");
+            assert_eq!(sc.count(), fd.sample_count);
+            assert!(
+                sc.is_within_regular_bound(regular),
+                "frame {idx} sample_count {} exceeds regular bound {regular}",
+                sc.count()
+            );
+
+            // Per spec/01 §4.1 / §5.5: every regular (non-last) frame
+            // carries exactly `regular` samples; the last frame may be
+            // shorter (and equals `expected_last_samples`).
+            if (idx as u32) + 1 == expected_frame_count {
+                assert_eq!(sc.count(), expected_last_samples);
+            } else {
+                assert_eq!(sc.count(), regular);
+            }
+        }
+    }
+}
