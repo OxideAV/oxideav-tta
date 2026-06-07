@@ -2395,3 +2395,98 @@ fn frame_geometry_typed_matches_parsed_stream() {
         assert_eq!(g.frame_samples_at(g.frame_count()), None);
     }
 }
+
+#[test]
+fn seek_point_typed_accessors_match_parsed_stream() {
+    // End-to-end cross-API agreement: walk a real multi-frame stream's
+    // worth of seek points (one per (frame_index, in_frame_offset)
+    // pair the Decoder produces from `seek_to_sample`) and confirm
+    // the typed sub-field accessors lift the same numbers the raw
+    // fields hold, with the spec's invariants honoured at every step.
+    //
+    // The same three-shape parameter grid the round-246 / round-251
+    // tests cover, so the seek-point surface is pinned against
+    // structurally-diverse frame geometries:
+    //   - mono 16-bit @ 44.1k, 2.5 s   => 3 frames
+    //   - stereo 16-bit @ 48k, 2 s     => 2 frames (exact-multiple)
+    //   - mono 24-bit @ 44.1k, 1 s     => 1 frame
+    let cases: &[(u32, u16, u16, u32)] = &[
+        // (total_samples, channels, bits_per_sample, sample_rate)
+        (110_250, 1, 16, 44_100),
+        (96_000, 2, 16, 48_000),
+        (44_100, 1, 24, 44_100),
+    ];
+    for &(total_samples, channels, bits_per_sample, sample_rate) in cases {
+        let samples = pseudo_noise(
+            total_samples as usize,
+            channels,
+            (1i32 << (bits_per_sample - 1)) - 1,
+            0xBADC_0FFE_u64.wrapping_mul(total_samples as u64),
+        );
+        let tta = encode(&samples, channels, bits_per_sample, sample_rate).expect("encode");
+        let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+        let frame_count = dec.frames.len();
+        let regular = dec.header.regular_frame_samples();
+
+        // Sample probes pin every interesting boundary: the first
+        // sample, the last sample, exact frame boundaries, and an
+        // in-frame offset for each frame the stream actually carries.
+        let mut probes: Vec<u64> = vec![0, total_samples as u64 - 1];
+        for f in 0..frame_count {
+            probes.push(f as u64 * regular as u64); // frame boundary
+            if total_samples as u64 > f as u64 * regular as u64 + 17 {
+                probes.push(f as u64 * regular as u64 + 17); // mid-frame
+            }
+        }
+        probes.sort();
+        probes.dedup();
+
+        for sample_index in probes {
+            let sp = dec.seek_to_sample(sample_index).expect("seek_to_sample");
+
+            // Typed frame_index round-trips against the parsed frame
+            // count and reports `is_last` consistent with the seek
+            // table's last-frame discrimination.
+            let fi = sp
+                .frame_index_typed(frame_count)
+                .expect("frame_index_typed");
+            assert_eq!(fi.index(), sp.frame_index);
+            assert_eq!(fi.is_last(frame_count), sp.frame_index + 1 == frame_count);
+
+            // Typed sample_offset round-trips against the regular
+            // per-frame sample count derived per spec/01 §4.1.
+            let off = sp
+                .sample_offset_typed(regular)
+                .expect("sample_offset_typed");
+            assert_eq!(off.offset(), sp.sample_offset_in_frame);
+            assert_eq!(off.is_frame_boundary(), sp.sample_offset_in_frame == 0);
+
+            // Interleaved-skip projection agrees with the existing
+            // raw arithmetic that `frame_iter_from_sample` uses
+            // internally (offset * channels).
+            assert_eq!(
+                off.interleaved_skip(channels),
+                (sp.sample_offset_in_frame as usize) * (channels as usize)
+            );
+        }
+
+        // Ad-hoc out-of-window literals reject at lift time with the
+        // documented variants.
+        let bad_fi = crate::SeekPoint {
+            frame_index: frame_count,
+            sample_offset_in_frame: 0,
+        };
+        assert_eq!(
+            bad_fi.frame_index_typed(frame_count),
+            Err(crate::Error::InvalidFrameIndex(frame_count))
+        );
+        let bad_off = crate::SeekPoint {
+            frame_index: 0,
+            sample_offset_in_frame: regular,
+        };
+        assert_eq!(
+            bad_off.sample_offset_typed(regular),
+            Err(crate::Error::InvalidInFrameSampleOffset(regular))
+        );
+    }
+}

@@ -156,6 +156,15 @@ fn header_single_bit_flips_never_panic_and_are_rejected() {
                          from decode())"
                     );
                 }
+                Error::InvalidFrameIndex(_) | Error::InvalidInFrameSampleOffset(_) => {
+                    panic!(
+                        "header bit flip at byte {byte_idx} bit {bit} \
+                         leaked a SeekPoint typed-accessor error from \
+                         the eager decode path (these variants surface only \
+                         when the typed lifting accessor is invoked, not \
+                         from decode())"
+                    );
+                }
             }
         }
     }

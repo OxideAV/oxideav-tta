@@ -879,6 +879,143 @@ pub struct SeekPoint {
     pub sample_offset_in_frame: u32,
 }
 
+/// Typed wrapper around a [`SeekPoint`]'s `frame_index` field — a
+/// zero-based index into the stream's seek table per `spec/01` §4.1 /
+/// §4.2.
+///
+/// Validated against the stream's `frame_count`: every
+/// parser-produced seek point is bounded by
+/// [`Decoder::seek_to_sample`]'s `frame_index < self.frames.len()`
+/// defensive gate, and the typed accessor surfaces that invariant at
+/// lift time so a caller that constructs a [`SeekPoint`] literal
+/// (e.g. an ad-hoc fixture) gets the same
+/// [`Error::InvalidFrameIndex`] discipline the random-access path
+/// produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FrameIndex(usize);
+
+impl FrameIndex {
+    /// Lift a raw `usize` into the typed accessor. Returns
+    /// [`Error::InvalidFrameIndex`] when `value >= frame_count` per
+    /// `spec/01` §4.1 (the closed-form `ceil(total_samples /
+    /// regular_frame_samples)` total). Every value in
+    /// `0..frame_count` is structurally legal: the empty-stream case
+    /// (`frame_count == 0` per spec §4.4) accepts no value, and the
+    /// non-empty case accepts exactly the seek-table window.
+    pub fn from_raw(value: usize, frame_count: usize) -> Result<Self> {
+        if value >= frame_count {
+            Err(Error::InvalidFrameIndex(value))
+        } else {
+            Ok(FrameIndex(value))
+        }
+    }
+
+    /// Zero-based index into the stream's seek table (`spec/01` §4.2).
+    pub fn index(&self) -> usize {
+        self.0
+    }
+
+    /// `true` when this index addresses the final frame of a stream
+    /// of `frame_count` frames (i.e. `index() + 1 == frame_count`).
+    /// The last frame is the only one allowed to carry fewer than
+    /// `regular_frame_samples` per-channel samples per `spec/01` §4.1.
+    pub fn is_last(&self, frame_count: usize) -> bool {
+        self.0 + 1 == frame_count
+    }
+}
+
+/// Typed wrapper around a [`SeekPoint`]'s `sample_offset_in_frame`
+/// field — the zero-based per-channel sample offset within the
+/// addressed frame per `spec/01` §4.1.
+///
+/// Validated against the stream's `regular_frame_samples`: every
+/// parser-produced offset is `sample_index % regular_frame_samples`
+/// per [`Decoder::seek_to_sample`], which is strictly less than the
+/// regular per-frame count by construction. The typed accessor
+/// surfaces that invariant at lift time so a caller that constructs a
+/// [`SeekPoint`] literal gets the same
+/// [`Error::InvalidInFrameSampleOffset`] discipline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InFrameSampleOffset(u32);
+
+impl InFrameSampleOffset {
+    /// Lift a raw `u32` into the typed accessor. Returns
+    /// [`Error::InvalidInFrameSampleOffset`] when `value >=
+    /// regular_frame_samples` per `spec/01` §4.1. The strict-less
+    /// bound is what makes `(frame_index, sample_offset_in_frame)` a
+    /// unique addressing pair: when the modulo reaches the regular
+    /// count it rolls over to the next frame's zero offset.
+    ///
+    /// A `regular_frame_samples` argument of `0` (only reachable for
+    /// the empty-stream case per `spec/01` §3.4) rejects every value
+    /// — there is no in-frame addressing window in an empty stream.
+    pub fn from_raw(value: u32, regular_frame_samples: u32) -> Result<Self> {
+        if value >= regular_frame_samples {
+            Err(Error::InvalidInFrameSampleOffset(value))
+        } else {
+            Ok(InFrameSampleOffset(value))
+        }
+    }
+
+    /// Zero-based per-channel sample offset within the addressed
+    /// frame (`spec/01` §4.1).
+    pub fn offset(&self) -> u32 {
+        self.0
+    }
+
+    /// `true` when the offset is exactly at the frame boundary
+    /// (`offset() == 0`) — the seek point addresses the first sample
+    /// of the frame, so the [`Decoder::frame_iter_from_sample`] prefix
+    /// skip is a no-op.
+    pub fn is_frame_boundary(&self) -> bool {
+        self.0 == 0
+    }
+
+    /// Number of interleaved `i32` PCM entries to discard from the
+    /// decoded `frame_index` frame to land exactly at the seek point,
+    /// given the stream's `channels` count (= `offset() * channels`
+    /// per `spec/01` §4.1 / §3.2 — the per-channel offset times the
+    /// channel-interleave stride). Saturates at `usize::MAX` on the
+    /// upper-end `(u32::MAX, u16::MAX)` envelope; the practical
+    /// `(46_080, 6)` ceiling for in-scope streams fits comfortably in
+    /// `usize` on every supported target.
+    pub fn interleaved_skip(&self, channels: u16) -> usize {
+        (self.0 as usize).saturating_mul(channels as usize)
+    }
+}
+
+impl SeekPoint {
+    /// Lifts the raw `frame_index` field into the typed
+    /// [`FrameIndex`] accessor per `spec/01` §4.1 / §4.2 (validates
+    /// `< frame_count`).
+    ///
+    /// A successfully-produced [`SeekPoint`] from
+    /// [`Decoder::seek_to_sample`] / [`Decoder::seek_to_time`] is
+    /// guaranteed to satisfy the bound because the defensive
+    /// `frame_index >= self.frames.len()` gate rejects out-of-range
+    /// indices at construction; the accessor returns a `Result`
+    /// rather than an infallible projection so an ad-hoc
+    /// [`SeekPoint`] literal constructed by a caller (e.g. a test
+    /// fixture) gets the same [`Error::InvalidFrameIndex`]
+    /// discipline.
+    pub fn frame_index_typed(&self, frame_count: usize) -> Result<FrameIndex> {
+        FrameIndex::from_raw(self.frame_index, frame_count)
+    }
+
+    /// Lifts the raw `sample_offset_in_frame` field into the typed
+    /// [`InFrameSampleOffset`] accessor per `spec/01` §4.1 (validates
+    /// `< regular_frame_samples`).
+    ///
+    /// A successfully-produced [`SeekPoint`] is guaranteed to satisfy
+    /// the bound because [`Decoder::seek_to_sample`] computes the
+    /// offset as `sample_index % regular_frame_samples`. Same
+    /// `Result` discipline as [`Self::frame_index_typed`] for the
+    /// ad-hoc-literal path.
+    pub fn sample_offset_typed(&self, regular_frame_samples: u32) -> Result<InFrameSampleOffset> {
+        InFrameSampleOffset::from_raw(self.sample_offset_in_frame, regular_frame_samples)
+    }
+}
+
 /// Lazy frame-by-frame decoder iterator returned by
 /// [`Decoder::frame_iter`].
 ///
@@ -1191,5 +1328,145 @@ mod duration_helpers_tests {
     #[test]
     fn samples_to_duration_sample_rate_zero_is_zero() {
         assert_eq!(samples_to_duration(123, 0), Duration::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod seek_point_typed_tests {
+    use super::{FrameIndex, InFrameSampleOffset, SeekPoint};
+    use crate::error::Error;
+
+    #[test]
+    fn frame_index_typed_boundary() {
+        // Empty stream (frame_count == 0): every value rejects.
+        assert_eq!(FrameIndex::from_raw(0, 0), Err(Error::InvalidFrameIndex(0)));
+        assert_eq!(
+            FrameIndex::from_raw(usize::MAX, 0),
+            Err(Error::InvalidFrameIndex(usize::MAX))
+        );
+
+        // Single-frame stream: index 0 accepts; 1 rejects.
+        let fi = FrameIndex::from_raw(0, 1).unwrap();
+        assert_eq!(fi.index(), 0);
+        assert!(fi.is_last(1));
+        assert_eq!(FrameIndex::from_raw(1, 1), Err(Error::InvalidFrameIndex(1)));
+
+        // Three-frame stream: indices 0/1/2 accept; 3 rejects.
+        for i in 0..3 {
+            let fi = FrameIndex::from_raw(i, 3).unwrap();
+            assert_eq!(fi.index(), i);
+            assert_eq!(fi.is_last(3), i == 2);
+        }
+        assert_eq!(FrameIndex::from_raw(3, 3), Err(Error::InvalidFrameIndex(3)));
+
+        // Upper-end usize: always rejects against any finite frame_count.
+        assert_eq!(
+            FrameIndex::from_raw(usize::MAX, 1_000_000),
+            Err(Error::InvalidFrameIndex(usize::MAX))
+        );
+    }
+
+    #[test]
+    fn in_frame_sample_offset_typed_boundary() {
+        // regular = 0 (only the empty-stream case): every value rejects.
+        assert_eq!(
+            InFrameSampleOffset::from_raw(0, 0),
+            Err(Error::InvalidInFrameSampleOffset(0))
+        );
+
+        // regular = 46_080 (derived for 44.1 kHz): 0..46_080 accept,
+        // 46_080 + rejects.
+        let zero = InFrameSampleOffset::from_raw(0, 46_080).unwrap();
+        assert_eq!(zero.offset(), 0);
+        assert!(zero.is_frame_boundary());
+        let mid = InFrameSampleOffset::from_raw(23_039, 46_080).unwrap();
+        assert_eq!(mid.offset(), 23_039);
+        assert!(!mid.is_frame_boundary());
+        let last_in = InFrameSampleOffset::from_raw(46_079, 46_080).unwrap();
+        assert_eq!(last_in.offset(), 46_079);
+        assert!(!last_in.is_frame_boundary());
+        assert_eq!(
+            InFrameSampleOffset::from_raw(46_080, 46_080),
+            Err(Error::InvalidInFrameSampleOffset(46_080))
+        );
+        assert_eq!(
+            InFrameSampleOffset::from_raw(u32::MAX, 46_080),
+            Err(Error::InvalidInFrameSampleOffset(u32::MAX))
+        );
+    }
+
+    #[test]
+    fn in_frame_sample_offset_interleaved_skip() {
+        let off = InFrameSampleOffset::from_raw(100, 46_080).unwrap();
+        // mono
+        assert_eq!(off.interleaved_skip(1), 100);
+        // stereo
+        assert_eq!(off.interleaved_skip(2), 200);
+        // 6 channels (max in scope)
+        assert_eq!(off.interleaved_skip(6), 600);
+        // zero channels (defensive — would mean a malformed header,
+        // but the helper must not panic): saturating_mul handles it.
+        assert_eq!(off.interleaved_skip(0), 0);
+
+        let zero = InFrameSampleOffset::from_raw(0, 46_080).unwrap();
+        assert_eq!(zero.interleaved_skip(6), 0);
+
+        // Upper-end u32 offset times u16::MAX must not overflow on
+        // 64-bit usize; on 32-bit usize the saturating multiply
+        // clamps to usize::MAX rather than panicking.
+        let near_max = InFrameSampleOffset::from_raw(46_079, 46_080).unwrap();
+        let skip = near_max.interleaved_skip(6);
+        assert_eq!(skip, 46_079 * 6);
+    }
+
+    #[test]
+    fn seek_point_typed_accessors_match_raw() {
+        // Hand-crafted seek point against a 3-frame, 44.1 kHz stream
+        // (regular_frame_samples == 46_080 per spec §4.1).
+        let sp = SeekPoint {
+            frame_index: 1,
+            sample_offset_in_frame: 12_345,
+        };
+        let fi = sp.frame_index_typed(3).unwrap();
+        assert_eq!(fi.index(), 1);
+        assert!(!fi.is_last(3));
+        let off = sp.sample_offset_typed(46_080).unwrap();
+        assert_eq!(off.offset(), 12_345);
+        assert!(!off.is_frame_boundary());
+
+        // Out-of-window frame_index: rejects.
+        let bad_fi = SeekPoint {
+            frame_index: 5,
+            sample_offset_in_frame: 0,
+        };
+        assert_eq!(
+            bad_fi.frame_index_typed(3),
+            Err(Error::InvalidFrameIndex(5))
+        );
+
+        // Out-of-window sample_offset_in_frame: rejects at the boundary.
+        let bad_off = SeekPoint {
+            frame_index: 0,
+            sample_offset_in_frame: 46_080,
+        };
+        assert_eq!(
+            bad_off.sample_offset_typed(46_080),
+            Err(Error::InvalidInFrameSampleOffset(46_080))
+        );
+    }
+
+    #[test]
+    fn seek_point_frame_boundary_zero_offset() {
+        // A seek to a frame boundary lands at offset 0; the typed
+        // accessor records that condition explicitly for player UIs
+        // that want to flag "no prefix skip needed" without computing
+        // the skip themselves.
+        let sp = SeekPoint {
+            frame_index: 2,
+            sample_offset_in_frame: 0,
+        };
+        let off = sp.sample_offset_typed(46_080).unwrap();
+        assert!(off.is_frame_boundary());
+        assert_eq!(off.interleaved_skip(2), 0);
     }
 }

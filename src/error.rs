@@ -59,6 +59,22 @@ pub enum Error {
     /// accessor rejects the structurally-impossible zero value at
     /// lift time rather than silently propagating it.
     InvalidFrameSampleCount(u32),
+    /// A [`crate::SeekPoint`]'s `frame_index` was outside the
+    /// `0..frame_count` window for the stream it claims to belong to.
+    /// Surfaces at typed-accessor lift time on an ad-hoc
+    /// [`crate::SeekPoint`] literal; the parser-produced seek points
+    /// from [`crate::Decoder::seek_to_sample`] /
+    /// [`crate::Decoder::seek_to_time`] are guaranteed to satisfy the
+    /// bound at construction.
+    InvalidFrameIndex(usize),
+    /// A [`crate::SeekPoint`]'s `sample_offset_in_frame` was at or
+    /// above the regular per-frame sample count derived per `spec/01`
+    /// §4.1. Per spec §4.1 / §5.5 every in-frame offset is strictly
+    /// less than the regular per-frame count (the modulo arithmetic
+    /// in `seek_to_sample` makes that a structural invariant); a
+    /// hand-crafted [`crate::SeekPoint`] that violates the gate is
+    /// rejected at typed-accessor lift time.
+    InvalidInFrameSampleOffset(u32),
 }
 
 impl core::fmt::Display for Error {
@@ -104,6 +120,18 @@ impl core::fmt::Display for Error {
                 write!(
                     f,
                     "oxideav-tta: frame sample_count {v} is below the 1-sample-per-frame minimum"
+                )
+            }
+            Error::InvalidFrameIndex(v) => {
+                write!(
+                    f,
+                    "oxideav-tta: seek-point frame_index {v} is outside the 0..frame_count window"
+                )
+            }
+            Error::InvalidInFrameSampleOffset(v) => {
+                write!(
+                    f,
+                    "oxideav-tta: seek-point sample_offset_in_frame {v} is at or above the regular per-frame sample count"
                 )
             }
         }

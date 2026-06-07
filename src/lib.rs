@@ -110,7 +110,8 @@ mod trace;
 mod trailers;
 
 pub use crate::decoder::{
-    decode_frame, Decoder, FrameIter, SampleRangeIter, SampleSkipIter, SeekPoint,
+    decode_frame, Decoder, FrameIndex, FrameIter, InFrameSampleOffset, SampleRangeIter,
+    SampleSkipIter, SeekPoint,
 };
 pub use crate::encoder::{encode, encode_with_password};
 pub use crate::error::{Error, Result};

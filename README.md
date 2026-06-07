@@ -709,3 +709,59 @@ Run locally with `cargo bench -p oxideav-tta --bench <decode|encode|roundtrip|st
   agreeing with every parsed `FrameDescriptor::sample_count`.
   Lib tests: 158 (default features). Integration tests unchanged
   at 9.
+
+## What round 254 adds on top
+
+- **Typed sub-field accessors for `SeekPoint`** per `spec/01` §4.1 /
+  §4.2 — the two `pub` fields on the existing round-187 `SeekPoint`
+  (`frame_index: usize` and `sample_offset_in_frame: u32`) are now
+  lifted into validated newtypes so a caller that hand-constructs a
+  seek point against an ad-hoc seek table gets the same window
+  discipline `Decoder::seek_to_sample` enforces at construction:
+  - [`FrameIndex`](src/decoder.rs) — `usize` newtype validated
+    against the stream's `frame_count`. Carries `index()` and
+    `is_last(frame_count)` (the same last-frame discrimination the
+    parser uses in `parse_seek_table` to assign
+    `FrameDescriptor::is_last` per `spec/01` §4.1).
+  - [`InFrameSampleOffset`](src/decoder.rs) — `u32` newtype
+    validated against the regular per-frame sample count derived
+    per `spec/01` §4.1 (`floor(sample_rate * 256 / 245)`). Carries
+    `offset()`, `is_frame_boundary()` (true when the offset is
+    zero — the player-API "no prefix skip needed" predicate), and
+    `interleaved_skip(channels)` (the prefix-entry count
+    `Decoder::frame_iter_from_sample` discards from the
+    `frame_index` frame's PCM buffer per `spec/01` §4.1 / §3.2).
+  - Two new `Error` variants — `InvalidFrameIndex(usize)` and
+    `InvalidInFrameSampleOffset(u32)` — surface the rejection at
+    lift time so an ad-hoc literal gets the same discipline the
+    random-access path enforces; both are slotted into the
+    `tests/malformed_props.rs` exhaustive panic-when-leaked match
+    because they surface only from typed-accessor invocation, never
+    from `decode()`.
+  - `SeekPoint::frame_index_typed(frame_count)` /
+    `SeekPoint::sample_offset_typed(regular_frame_samples)` —
+    `Result`-returning lifting accessors. The raw fields stay public;
+    the typed accessors are purely additive.
+  Five new unit tests in `decoder::seek_point_typed_tests` pin the
+  boundary cases (`FrameIndex` empty-stream / single-frame /
+  three-frame / upper-end `usize`, `InFrameSampleOffset`
+  zero-regular / 44.1k-derived `46_080` boundary including the
+  rejection at the regular ceiling, the `interleaved_skip` projection
+  across `mono` / `stereo` / `6ch` and the `0` defensive channel
+  case, the ad-hoc-literal cross-check between `SeekPoint`'s typed
+  accessors and the validated newtypes, and the frame-boundary
+  predicate). One new integration test in `roundtrip_tests`
+  (`seek_point_typed_accessors_match_parsed_stream`) walks the same
+  three-shape encoded-stream grid the round-246 / round-251 tests
+  use and confirms cross-API agreement on every `Decoder::seek_to_sample`
+  probe (first sample, last sample, every frame boundary, every
+  mid-frame offset): the typed `frame_index` lift agrees with the
+  raw field and reports `is_last` consistent with the seek table's
+  last-frame discrimination, the typed `sample_offset` lift agrees
+  with the raw field and `is_frame_boundary` matches the
+  `sample_offset_in_frame == 0` source-side gate, and the
+  `interleaved_skip` projection equals the `(offset * channels)`
+  arithmetic `frame_iter_from_sample` uses internally — plus
+  out-of-window literal rejection on both accessors. Lib tests: 164
+  (default features) / 169 (all-features) / 155 (no-default-features).
+  Integration tests unchanged at 9.
