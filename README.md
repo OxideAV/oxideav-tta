@@ -640,3 +640,72 @@ Run locally with `cargo bench -p oxideav-tta --bench <decode|encode|roundtrip|st
   from `header.frame_geometry()`. Lib tests: 152 (default features) /
   157 (all-features) / 143 (no-default-features). Integration tests
   unchanged at 9.
+
+## What round 251 adds on top
+
+- **Typed projection of the per-stream frame geometry** per
+  `spec/01` §4.1 — the `(frame_count, regular_frame_samples,
+  last_frame_samples)` triple that `StreamHeader::frame_geometry`
+  has been returning as a bare `(u32, u32)` tuple since round 1.
+  The new [`FrameGeometry`](src/header.rs) newtype threads the
+  triple together, so callers do not have to re-derive
+  `regular_frame_samples` separately when they already have the
+  geometry in hand:
+  - `frame_count()` — number of frames in the stream
+    (`ceil(total_samples / regular_frame_samples)` per spec §4.1, or
+    `0` for the empty-stream case `total_samples == 0` per spec §3.4).
+  - `regular_frame_samples()` — `floor(sample_rate * 256 / 245)`
+    per spec §4.1.
+  - `last_frame_samples()` — `<= regular_frame_samples` per spec §4.1;
+    equals `regular_frame_samples` when `total_samples` is an exact
+    multiple of the regular count.
+  - `is_empty()` — short-circuit for the empty-stream case.
+  - `is_exact_multiple()` — predicate matching spec §4.1's exact-
+    multiple branch (`last == regular` for non-empty streams).
+  - `frame_samples_at(frame_index)` — per-frame sample-count lookup
+    (`regular_frame_samples` for every non-last frame, `last_frame_samples`
+    for the trailing one) matching the per-`FrameDescriptor.sample_count`
+    assignment made by `parse_seek_table`.
+  - `seek_table_size_bytes()` — `4 * frame_count + 4` per spec §4.2
+    (entries + trailing CRC; `4` for an empty stream per spec §4.4).
+  - `total_samples()` — round-trips the geometry back to the source
+    `StreamHeader::total_samples` field per spec §3.4 in `u64`
+    arithmetic so the back-derivation stays overflow-free across the
+    full `(total_samples = u32::MAX, sample_rate = MAX_SAMPLE_RATE)`
+    envelope.
+  `StreamHeader` gains a new `frame_geometry_typed()` accessor that
+  projects the existing bare-tuple `frame_geometry()` return into
+  the typed newtype. The bare tuple is kept for backward
+  compatibility — every existing caller in `src/` and `benches/`
+  continues to destructure `(frame_count, last_samples)` verbatim;
+  the typed projection is purely additive. Five new unit tests in
+  `header::tests` pin the surface: the three-shape round-trip
+  (`(1, 44_100)` single-frame, `(3, 18_090)` three-frame, `(2,
+  46_080)` exact-multiple) walking every accessor; the empty-stream
+  case at `total_samples = 0` confirming `is_empty`, the `4`-byte
+  seek-table size from `spec/01` §4.4, and the `None` past-end
+  `frame_samples_at`; the bare-tuple-vs-typed-projection agreement
+  across a six-shape parameter grid (including the empty stream
+  and the 24-bit / multi-channel cases) confirming the typed
+  accessor is sugar over the existing `frame_geometry` return; the
+  `(total_samples = u32::MAX, sample_rate = MAX_SAMPLE_RATE)`
+  envelope canary against a future regression that drops the `u64`
+  back-derivation widening; and an end-to-end parsed-header
+  round-trip confirming the typed projection's
+  `seek_table_size_bytes` matches the `spec/01` §4.2 closed form
+  and `frame_samples_at` matches the parser's per-frame `is_last`
+  discrimination. One new integration test in `roundtrip_tests`
+  confirms cross-API agreement on a real encoded multi-frame stream:
+  the same three independent shapes from the round-246 cross-check
+  (mono 16-bit @ 44.1k / 2.5 s — three frames, stereo 16-bit @ 48k /
+  2 s — exact-multiple two frames, mono 24-bit @ 44.1k / 1 s — one
+  frame), with the typed projection's `frame_count` / `last_frame_samples`
+  agreeing with the bare-tuple return, the projection's `regular_frame_samples`
+  agreeing with `StreamHeader::regular_frame_samples`, the projection's
+  `total_samples` round-tripping back to the header field, the projection's
+  `seek_table_size_bytes` matching `4 * frame_count + 4`, the
+  `is_exact_multiple` predicate matching the `total_samples mod
+  regular == 0` source-side gate, and the per-frame `frame_samples_at`
+  agreeing with every parsed `FrameDescriptor::sample_count`.
+  Lib tests: 158 (default features). Integration tests unchanged
+  at 9.

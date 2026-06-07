@@ -2328,3 +2328,70 @@ fn frame_descriptor_typed_accessors_match_parsed_stream() {
         }
     }
 }
+
+#[test]
+fn frame_geometry_typed_matches_parsed_stream() {
+    // End-to-end cross-API agreement: parse a real multi-frame stream
+    // and confirm the round-251 `FrameGeometry` typed projection on
+    // `StreamHeader` agrees bit-for-bit with the decoder's actual
+    // frame-table walk (per-frame sample counts, regular-vs-last
+    // discrimination, seek-table on-disk size, total-samples
+    // back-derivation).
+    //
+    // The same three-case parameter grid the round-246
+    // `frame_descriptor_typed_accessors_match_parsed_stream` test
+    // covers, so the geometry-side surface is pinned against the same
+    // structurally-diverse shapes:
+    //   - mono 16-bit @ 44.1k, 2.5 s   => 3 frames (regular, regular, last)
+    //   - stereo 16-bit @ 48k, 2 s     => 2 frames (exact-multiple)
+    //   - mono 24-bit @ 44.1k, 1 s     => 1 frame (last == only)
+    let cases: &[(u32, u16, u16, u32)] = &[
+        // (total_samples, channels, bits_per_sample, sample_rate)
+        (110_250, 1, 16, 44_100),
+        (96_000, 2, 16, 48_000),
+        (44_100, 1, 24, 44_100),
+    ];
+    for &(total_samples, channels, bits_per_sample, sample_rate) in cases {
+        let samples = pseudo_noise(
+            total_samples as usize,
+            channels,
+            (1i32 << (bits_per_sample - 1)) - 1,
+            0xFEED_C0DE_u64.wrapping_mul(total_samples as u64),
+        );
+        let tta = encode(&samples, channels, bits_per_sample, sample_rate).expect("encode");
+        let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+
+        let g = dec.header.frame_geometry_typed();
+        let (bare_count, bare_last) = dec.header.frame_geometry();
+        // Typed projection's accessors agree with the bare-tuple
+        // return + the `regular_frame_samples` derivation.
+        assert_eq!(g.frame_count(), bare_count);
+        assert_eq!(g.last_frame_samples(), bare_last);
+        assert_eq!(
+            g.regular_frame_samples(),
+            dec.header.regular_frame_samples()
+        );
+        // Decoder's actual frame table has the same length.
+        assert_eq!(dec.frames.len() as u32, g.frame_count());
+        // Total-samples back-derivation round-trips through the typed
+        // projection to the source header field.
+        assert_eq!(g.total_samples(), dec.header.total_samples);
+        // On-disk seek-table size matches `spec/01` §4.2's closed form.
+        assert_eq!(g.seek_table_size_bytes(), bare_count as usize * 4 + 4);
+        // exact-multiple gate: `total_samples mod regular == 0`
+        // iff `last == regular` (the spec §4.1 exact-multiple branch).
+        let expected_exact = total_samples % dec.header.regular_frame_samples() == 0;
+        assert_eq!(g.is_exact_multiple(), expected_exact);
+
+        // Per-frame sample lookup agrees with the parsed
+        // `FrameDescriptor::sample_count` on every frame.
+        for (idx, fd) in dec.frames.iter().enumerate() {
+            let want = g
+                .frame_samples_at(idx as u32)
+                .expect("frame_samples_at in range");
+            assert_eq!(want, fd.sample_count);
+        }
+        // One past the last frame is None.
+        assert_eq!(g.frame_samples_at(g.frame_count()), None);
+    }
+}

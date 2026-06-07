@@ -302,6 +302,26 @@ impl StreamHeader {
         }
     }
 
+    /// Typed projection of [`Self::frame_geometry`] into the
+    /// [`FrameGeometry`] newtype per `spec/01` §4.1.
+    ///
+    /// Equivalent in content to the bare-tuple variant — every
+    /// successfully-parsed [`StreamHeader`] produces a structurally-
+    /// consistent triple — but threads the `(frame_count,
+    /// regular_frame_samples, last_frame_samples)` triple together so
+    /// callers do not have to re-derive `regular` separately when they
+    /// already have the geometry in hand. Used by the registry's
+    /// `seek_table_size_bytes` arithmetic + the `last`-frame branch in
+    /// the per-frame decoder.
+    pub fn frame_geometry_typed(&self) -> FrameGeometry {
+        let (frame_count, last_frame_samples) = self.frame_geometry();
+        FrameGeometry {
+            frame_count,
+            regular_frame_samples: self.regular_frame_samples(),
+            last_frame_samples,
+        }
+    }
+
     /// Lifts the raw `format` field into the typed [`Format`] enum.
     ///
     /// A successfully-parsed header is guaranteed to carry a value in
@@ -452,6 +472,136 @@ impl FrameSampleCount {
     /// geometry rule without re-deriving the regular count themselves.
     pub fn is_within_regular_bound(&self, regular_frame_samples: u32) -> bool {
         self.0 <= regular_frame_samples
+    }
+}
+
+/// Typed view of the per-stream frame geometry derived from a
+/// [`StreamHeader`] per `spec/01` §4.1 — the triple `(frame_count,
+/// regular_frame_samples, last_frame_samples)`.
+///
+/// The triple is the spec's complete description of the seek-table
+/// shape: every non-last frame carries exactly `regular_frame_samples`
+/// per-channel samples, the last frame carries `last_frame_samples`
+/// (where `last_frame_samples <= regular_frame_samples`), and there
+/// are `frame_count` frames in total. The triple is computed from the
+/// stream header's `(sample_rate, total_samples)` fields per the
+/// closed-form `floor(sample_rate * 256 / 245)` regular frame length
+/// plus the bookkeeping rule of `spec/01` §4.1:
+///
+/// * `regular_frame_samples = floor(sample_rate * 256 / 245)`
+/// * `last_frame_samples_raw = total_samples mod regular_frame_samples`
+/// * if `last_frame_samples_raw == 0`:
+///   * `frame_count = total_samples / regular_frame_samples`
+///   * `last_frame_samples = regular_frame_samples`
+/// * else:
+///   * `frame_count = (total_samples / regular_frame_samples) + 1`
+///   * `last_frame_samples = last_frame_samples_raw`
+///
+/// The empty-stream case (`total_samples == 0` per `spec/01` §3.4)
+/// produces `frame_count == 0` and `last_frame_samples == 0` —
+/// [`Self::is_empty`] surfaces the case for callers that want to
+/// short-circuit the seek-table walk.
+///
+/// Existing callers continue to use the bare-tuple
+/// [`StreamHeader::frame_geometry`] return value verbatim; the typed
+/// projection is purely additive (`spec/01` §4.1 doesn't change).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FrameGeometry {
+    /// Number of frames in the stream. `0` for an empty stream
+    /// (`total_samples == 0`); otherwise `ceil(total_samples /
+    /// regular_frame_samples)`.
+    frame_count: u32,
+    /// Per-channel samples in a regular (non-last) frame:
+    /// `floor(sample_rate * 256 / 245)`. `0` only when the source
+    /// header carried `sample_rate == 0` (rejected by
+    /// [`parse_stream_header`]; defensive against ad-hoc
+    /// [`StreamHeader`] literals).
+    regular_frame_samples: u32,
+    /// Per-channel samples in the last frame. Equal to
+    /// [`Self::regular_frame_samples`] when `total_samples` is an
+    /// exact multiple of the regular count, strictly less otherwise.
+    /// `0` for an empty stream.
+    last_frame_samples: u32,
+}
+
+impl FrameGeometry {
+    /// Number of frames in the stream (`>= 0`).
+    pub fn frame_count(&self) -> u32 {
+        self.frame_count
+    }
+
+    /// Per-channel samples in a regular (non-last) frame per
+    /// `spec/01` §4.1's `floor(sample_rate * 256 / 245)` closed form.
+    pub fn regular_frame_samples(&self) -> u32 {
+        self.regular_frame_samples
+    }
+
+    /// Per-channel samples in the last frame (`<= regular_frame_samples`
+    /// per `spec/01` §4.1; `== regular_frame_samples` when
+    /// `total_samples` is an exact multiple of the regular count).
+    pub fn last_frame_samples(&self) -> u32 {
+        self.last_frame_samples
+    }
+
+    /// `true` for a structurally-empty stream (`frame_count == 0`,
+    /// matching `total_samples == 0` per `spec/01` §3.4). Convenience
+    /// for callers that want to short-circuit the seek-table walk.
+    pub fn is_empty(&self) -> bool {
+        self.frame_count == 0
+    }
+
+    /// `true` when `total_samples` is an exact multiple of
+    /// `regular_frame_samples` — i.e. the last frame is itself a
+    /// regular-length frame. False for the empty-stream case
+    /// (`frame_count == 0`) and for streams whose last frame is
+    /// strictly shorter than the regular cap.
+    pub fn is_exact_multiple(&self) -> bool {
+        self.frame_count != 0 && self.last_frame_samples == self.regular_frame_samples
+    }
+
+    /// Per-channel sample count for the frame at the supplied
+    /// zero-based index per `spec/01` §4.1 / §5.5: every regular
+    /// (non-last) frame carries exactly [`Self::regular_frame_samples`];
+    /// the last frame carries [`Self::last_frame_samples`].
+    ///
+    /// Returns `None` for `frame_index >= frame_count` (out-of-range,
+    /// or the empty-stream case where every index is past-end).
+    pub fn frame_samples_at(&self, frame_index: u32) -> Option<u32> {
+        if frame_index >= self.frame_count {
+            return None;
+        }
+        Some(if frame_index + 1 == self.frame_count {
+            self.last_frame_samples
+        } else {
+            self.regular_frame_samples
+        })
+    }
+
+    /// On-disk byte footprint of the seek table per `spec/01` §4.2:
+    /// `4 * frame_count + 4` (entries + the trailing 32-bit CRC).
+    /// Equals exactly `4` for the empty-stream case (zero entries, just
+    /// the CRC) per `spec/01` §4.4 — the empty-stream seek table is
+    /// still present on disk as the bare CRC.
+    pub fn seek_table_size_bytes(&self) -> usize {
+        (self.frame_count as usize) * 4 + 4
+    }
+
+    /// Recompute the per-channel `total_samples` per `spec/01` §3.4
+    /// from the geometry. Equal to the [`StreamHeader::total_samples`]
+    /// the geometry was derived from for every header parser-produced
+    /// (or ad-hoc but spec-respecting) shape:
+    /// `(frame_count - 1) * regular_frame_samples + last_frame_samples`
+    /// for `frame_count >= 1`, else `0`. Computed in `u64` so the
+    /// arithmetic stays overflow-free even at the upper end of the
+    /// (`total_samples = u32::MAX`, `sample_rate = MAX_SAMPLE_RATE`)
+    /// envelope; the return is narrowed back to `u32` because the
+    /// source field is `u32`.
+    pub fn total_samples(&self) -> u32 {
+        if self.frame_count == 0 {
+            return 0;
+        }
+        let regulars = (self.frame_count as u64 - 1) * (self.regular_frame_samples as u64);
+        (regulars + self.last_frame_samples as u64) as u32
     }
 }
 
@@ -1209,6 +1359,169 @@ mod tests {
         assert_eq!(seek.frames[0].sample_count, regular);
         assert_eq!(seek.frames[1].sample_count, regular);
         assert_eq!(seek.frames[2].sample_count, last_samples);
+    }
+
+    #[test]
+    fn frame_geometry_typed_round_trip() {
+        // Mirrors the bare-tuple `frame_geometry_examples` test but on
+        // the typed projection. Every shape recoverable from the bare
+        // tuple is also recoverable from the typed accessor.
+        let h = StreamHeader {
+            format: 1,
+            channels: 1,
+            bits_per_sample: 16,
+            sample_rate: 44_100,
+            total_samples: 44_100,
+        };
+        let g = h.frame_geometry_typed();
+        assert_eq!(g.frame_count(), 1);
+        assert_eq!(g.regular_frame_samples(), 46_080);
+        assert_eq!(g.last_frame_samples(), 44_100);
+        assert!(!g.is_empty());
+        assert!(!g.is_exact_multiple());
+        assert_eq!(g.seek_table_size_bytes(), 8); // 4 * 1 + 4
+        assert_eq!(g.total_samples(), h.total_samples);
+        // Per-frame sample lookup: the only frame (idx 0) is the last
+        // frame, so its sample count == last_frame_samples.
+        assert_eq!(g.frame_samples_at(0), Some(44_100));
+        assert_eq!(g.frame_samples_at(1), None);
+
+        // 2.5 s @ 44.1k mono => 3 frames (regular, regular, 18_090).
+        let h = StreamHeader {
+            total_samples: 110_250,
+            ..h
+        };
+        let g = h.frame_geometry_typed();
+        assert_eq!(g.frame_count(), 3);
+        assert_eq!(g.regular_frame_samples(), 46_080);
+        assert_eq!(g.last_frame_samples(), 18_090);
+        assert!(!g.is_exact_multiple());
+        // seek_table_size = 4 * 3 + 4 = 16.
+        assert_eq!(g.seek_table_size_bytes(), 16);
+        assert_eq!(g.total_samples(), h.total_samples);
+        assert_eq!(g.frame_samples_at(0), Some(46_080));
+        assert_eq!(g.frame_samples_at(1), Some(46_080));
+        assert_eq!(g.frame_samples_at(2), Some(18_090));
+        assert_eq!(g.frame_samples_at(3), None);
+
+        // Exact multiple: 92_160 = 2 * 46_080 => 2 frames, last == regular.
+        let h = StreamHeader {
+            total_samples: 92_160,
+            ..h
+        };
+        let g = h.frame_geometry_typed();
+        assert_eq!(g.frame_count(), 2);
+        assert_eq!(g.last_frame_samples(), 46_080);
+        assert!(g.is_exact_multiple());
+        assert_eq!(g.frame_samples_at(0), Some(46_080));
+        assert_eq!(g.frame_samples_at(1), Some(46_080));
+        assert_eq!(g.total_samples(), h.total_samples);
+    }
+
+    #[test]
+    fn frame_geometry_typed_empty_stream() {
+        // `total_samples = 0` per `spec/01` §3.4 => zero frames.
+        let h = StreamHeader {
+            format: 1,
+            channels: 1,
+            bits_per_sample: 16,
+            sample_rate: 44_100,
+            total_samples: 0,
+        };
+        let g = h.frame_geometry_typed();
+        assert_eq!(g.frame_count(), 0);
+        assert_eq!(g.last_frame_samples(), 0);
+        assert!(g.is_empty());
+        assert!(!g.is_exact_multiple());
+        // Even an empty stream still carries the trailing seek-table
+        // CRC on disk (`spec/01` §4.4) — `seek_table_size_bytes` is 4.
+        assert_eq!(g.seek_table_size_bytes(), 4);
+        // Every frame index is past-end on an empty stream.
+        assert_eq!(g.frame_samples_at(0), None);
+        // Round-trip back to total_samples.
+        assert_eq!(g.total_samples(), 0);
+    }
+
+    #[test]
+    fn frame_geometry_typed_matches_bare_tuple() {
+        // The typed projection's `frame_count` / `last_frame_samples`
+        // pair must agree bit-for-bit with the bare-tuple
+        // `frame_geometry` return for every shape — the typed
+        // accessor is sugar, not a redefinition.
+        let cases: &[(u32, u16, u16, u32)] = &[
+            (44_100, 1, 16, 44_100),
+            (110_250, 1, 16, 44_100),
+            (92_160, 1, 16, 44_100),
+            (0, 1, 16, 44_100),
+            (96_000, 2, 16, 48_000),
+            (44_100, 1, 24, 44_100),
+        ];
+        for &(total_samples, channels, bits_per_sample, sample_rate) in cases {
+            let h = StreamHeader {
+                format: 1,
+                channels,
+                bits_per_sample,
+                sample_rate,
+                total_samples,
+            };
+            let (bare_count, bare_last) = h.frame_geometry();
+            let typed = h.frame_geometry_typed();
+            assert_eq!(typed.frame_count(), bare_count);
+            assert_eq!(typed.last_frame_samples(), bare_last);
+            assert_eq!(typed.regular_frame_samples(), h.regular_frame_samples());
+            // Empty stream <=> bare_count == 0.
+            assert_eq!(typed.is_empty(), bare_count == 0);
+            // total_samples round-trips back to the source field.
+            assert_eq!(typed.total_samples(), total_samples);
+        }
+    }
+
+    #[test]
+    fn frame_geometry_typed_envelope_upper_bound() {
+        // Upper envelope: total_samples = u32::MAX,
+        // sample_rate = MAX_SAMPLE_RATE = 0x7FFFFF. The arithmetic
+        // must not overflow and the geometry must round-trip cleanly.
+        let h = StreamHeader {
+            format: 1,
+            channels: 1,
+            bits_per_sample: 16,
+            sample_rate: MAX_SAMPLE_RATE,
+            total_samples: u32::MAX,
+        };
+        let regular = h.regular_frame_samples();
+        let (bare_count, bare_last) = h.frame_geometry();
+        let g = h.frame_geometry_typed();
+        assert_eq!(g.frame_count(), bare_count);
+        assert_eq!(g.regular_frame_samples(), regular);
+        assert_eq!(g.last_frame_samples(), bare_last);
+        // total_samples back-derivation matches the source field.
+        assert_eq!(g.total_samples(), u32::MAX);
+    }
+
+    #[test]
+    fn frame_geometry_typed_from_parsed_header() {
+        // End-to-end: parse a real header and confirm the typed
+        // projection matches the bare tuple (which is what the rest
+        // of the decoder uses already).
+        let buf = build_header_bytes(1, 1, 16, 44_100, 110_250);
+        let (h, _) = parse_stream_header(&buf).unwrap();
+        let g = h.frame_geometry_typed();
+        assert_eq!(g.frame_count(), 3);
+        assert_eq!(g.regular_frame_samples(), 46_080);
+        assert_eq!(g.last_frame_samples(), 18_090);
+        // Spec/01 §4.2 cross-check: a 3-frame stream's seek table is
+        // 4 * 3 + 4 = 16 bytes on disk.
+        assert_eq!(g.seek_table_size_bytes(), 16);
+        // The per-frame sample lookup must agree with the per-frame
+        // `is_last` discrimination the parsed seek-table walk uses.
+        for idx in 0..g.frame_count() {
+            let expected = if idx + 1 == g.frame_count() {
+                g.last_frame_samples()
+            } else {
+                g.regular_frame_samples()
+            };
+            assert_eq!(g.frame_samples_at(idx), Some(expected));
+        }
     }
 
     #[test]
