@@ -8,6 +8,55 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-261: typed `TrailerInfo` sub-field accessors per `spec/01` §7.
+  Lifts the two `pub` `Option<(usize, usize)>` byte-tuple fields on
+  the existing round-4 `TrailerInfo` (`id3v1`, `apev2`) into validated
+  `Id3v1Range` / `ApeV2Range` newtypes so a caller hand-constructing a
+  trailer-info literal (e.g. a host-application synthetic fixture, or
+  a different-source detector that bypasses `detect_trailers`) gets
+  the same `spec/01` §7 invariants the parser enforces at construction:
+  ID3v1 is exactly 128 bytes anchored at file end
+  (`start + len == file_len`) per the spec §7 "file's last 128 bytes
+  start with `'TAG'`" detection rule, and APEv2 is at least the
+  32-byte footer minimum per the APE tags header spec referenced from
+  spec §7, with `start + len <= file_len` bounding. New
+  `Id3v1Range` newtype carries `start()`, `len()`, `is_empty()` (always
+  `false` by the spec §7 fixed-128 invariant), `end()`, `byte_range()`
+  (half-open `Range<usize>` ready for direct buffer slicing), and
+  `is_at_file_end(file_len)`; new `ApeV2Range` newtype carries the
+  same shape plus `header_and_body_size()` (= `len - 32` per spec §7,
+  isolating the body + optional 32-byte header from the fixed footer)
+  and the `FOOTER_SIZE` / `HEADER_SIZE` associated constants per the
+  APE tags header spec. Two new `Error` variants —
+  `InvalidId3v1Range(usize, usize)` and `InvalidApeV2Range(usize, usize)`
+  — surface the rejection at lift time so an ad-hoc literal gets the
+  same `spec/01` §7 discipline the parser enforces; both are slotted
+  into the `tests/malformed_props.rs` exhaustive panic-when-leaked
+  match because they surface only from typed-accessor invocation,
+  never from `decode()`. New `TrailerInfo::id3v1_typed(file_len)` /
+  `TrailerInfo::apev2_typed(file_len)` `Result<Option<...>>`-returning
+  lifting accessors and `TrailerInfo::combined_byte_range()` (smallest
+  contiguous `(start, len)` window covering every detected trailer —
+  the bytes a host application slices to preserve out-of-stream
+  metadata on round-trip re-encode per spec §7) complete the surface;
+  the raw fields stay public so the addition is purely additive.
+  Eighteen new unit tests in `trailers::tests` pin the boundary cases
+  (anchored-at-file-end / not-anchored / past-file-end / overflow /
+  wrong-length-grid for ID3v1; footer-only / body+footer /
+  header+body+footer / not-anchored / sub-footer-grid / past-file-end
+  / overflow for APEv2; parser-output cross-check on id3v1-only /
+  apev2-only / both; combined window over empty / single / both;
+  hand-built literal rejection cycle), plus one new integration test
+  in `roundtrip_tests` (`scan_trailers_typed_accessors_match_parser_output`)
+  that walks `scan_trailers` over a real encoded TTA1 stream
+  augmented with both an APEv2 footer-only region and an ID3v1
+  trailer and confirms the typed views agree with the parser output
+  bit for bit, the half-open byte ranges yield the right magic bytes
+  out of the buffer, and decode is still bit-exact end-to-end past
+  the trailers per spec/01 §7. Lib tests: 182 (default features) /
+  187 (all-features) / 173 (no-default-features). Integration tests
+  unchanged at 9.
+
 - Round-254: typed `SeekPoint` sub-field accessors per `spec/01` §4.1
   / §4.2. Lifts the two `pub` fields on the existing round-187
   `SeekPoint` (`frame_index: usize`, `sample_offset_in_frame: u32`)

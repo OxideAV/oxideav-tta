@@ -165,6 +165,15 @@ fn header_single_bit_flips_never_panic_and_are_rejected() {
                          from decode())"
                     );
                 }
+                Error::InvalidId3v1Range(_, _) | Error::InvalidApeV2Range(_, _) => {
+                    panic!(
+                        "header bit flip at byte {byte_idx} bit {bit} \
+                         leaked a TrailerInfo typed-accessor error from \
+                         the eager decode path (these variants surface only \
+                         when the typed Id3v1Range / ApeV2Range lifting \
+                         accessor is invoked on TrailerInfo, not from decode())"
+                    );
+                }
             }
         }
     }

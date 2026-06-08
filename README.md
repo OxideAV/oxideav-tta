@@ -7,14 +7,17 @@ Pure-Rust True Audio (TTA) lossless audio codec for the
 
 **Round 5 (+ r187 streaming surface, r204 format=2 streaming reach,
 r209 sample-keyed player-API sugar, r215 duration-keyed player-API
-sugar, r219 half-open sample/time range quartet) — clean-room encoder
-+ decoder + framework integration + trace tape + format=2 +
-ID3v1/APEv2 trailer detection + multi-frame format=2 trace coverage +
-format=2 streaming/random-access surface + `decode_from_sample` /
+sugar, r219 half-open sample/time range quartet, r261 typed
+`TrailerInfo` sub-field accessors) — clean-room encoder + decoder +
+framework integration + trace tape + format=2 + ID3v1/APEv2 trailer
+detection + multi-frame format=2 trace coverage + format=2
+streaming/random-access surface + `decode_from_sample` /
 `frame_iter_from_sample` + `decode_from_time` / `frame_iter_from_time` /
 `seek_to_time` / `total_duration` + `decode_sample_range` /
 `frame_iter_sample_range` / `decode_time_range` /
-`frame_iter_time_range`.** Both encodes and decodes TTA1 format=1
+`frame_iter_time_range` + typed `Id3v1Range` / `ApeV2Range` on
+`TrailerInfo::id3v1_typed` / `apev2_typed` /
+`combined_byte_range` per `spec/01` §7.** Both encodes and decodes TTA1 format=1
 (integer PCM) and format=2 (password-derived qm priming, `spec/07`)
 streams in pure safe Rust against the strict-isolation clean-room
 workspace at

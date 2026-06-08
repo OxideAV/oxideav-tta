@@ -494,6 +494,72 @@ fn scan_trailers_returns_empty_on_clean_tta_file() {
 }
 
 #[test]
+fn scan_trailers_typed_accessors_match_parser_output() {
+    // Walks `scan_trailers` against a real encoded TTA1 stream
+    // augmented with both an APEv2 footer-only region and an
+    // ID3v1 trailer, then lifts both detected ranges via the
+    // round-261 typed `Id3v1Range` / `ApeV2Range` accessors and
+    // confirms the typed views agree with the parser output bit
+    // for bit per `spec/01` §7.
+    let n = 256;
+    let samples = sine(n, 1, 44_100, 440.0, 4_000);
+    let mut tta = encode(&samples, 1, 16, 44_100).expect("encode should succeed");
+    let eos = tta.len();
+
+    // ── APEv2 footer-only region (50-byte body + 32-byte footer). ──
+    let body_size = 50;
+    tta.extend(std::iter::repeat(0xAAu8).take(body_size));
+    tta.extend_from_slice(b"APETAGEX");
+    tta.extend_from_slice(&2000u32.to_le_bytes());
+    tta.extend_from_slice(&((body_size + 32) as u32).to_le_bytes());
+    tta.extend_from_slice(&7u32.to_le_bytes()); // item_count
+    tta.extend_from_slice(&0x2000_0000u32.to_le_bytes()); // flags (is_footer)
+    tta.extend_from_slice(&[0u8; 8]); // reserved
+    let ape_end = tta.len();
+
+    // ── ID3v1 trailer (128 bytes, 'TAG' magic). ──
+    tta.extend_from_slice(b"TAG");
+    tta.extend(std::iter::repeat(0u8).take(125));
+    let file_len = tta.len();
+
+    let info = crate::scan_trailers(&tta).expect("trailer scan");
+
+    // Raw fields still match the existing parser shape.
+    assert_eq!(info.id3v1, Some((ape_end, 128)));
+    assert_eq!(info.apev2, Some((eos, body_size + 32)));
+
+    // Typed lift: ID3v1.
+    let id3 = info.id3v1_typed(file_len).unwrap().expect("present");
+    assert_eq!(id3.start(), ape_end);
+    assert_eq!(id3.len(), 128);
+    assert_eq!(id3.end(), file_len);
+    assert!(id3.is_at_file_end(file_len));
+    assert_eq!(id3.byte_range(), ape_end..file_len);
+    assert_eq!(&tta[id3.byte_range()][..3], b"TAG");
+
+    // Typed lift: APEv2.
+    let ape = info.apev2_typed(file_len).unwrap().expect("present");
+    assert_eq!(ape.start(), eos);
+    assert_eq!(ape.len(), body_size + 32);
+    assert_eq!(ape.end(), ape_end);
+    assert!(!ape.is_at_file_end(file_len)); // ID3v1 trails it
+    assert_eq!(ape.header_and_body_size(), body_size);
+    // The footer magic lives at the end of the APE region.
+    let footer_start = ape.end() - crate::ApeV2Range::FOOTER_SIZE;
+    assert_eq!(&tta[footer_start..footer_start + 8], b"APETAGEX");
+
+    // Combined window covers both trailers contiguously.
+    let combined = info.combined_byte_range().unwrap();
+    assert_eq!(combined, (eos, (body_size + 32) + 128));
+    assert_eq!(combined.0 + combined.1, file_len);
+
+    // Decode is still bit-exact end-to-end (trailers are out of TTA1
+    // scope per spec/01 §7).
+    let (_, decoded) = decode(&tta).expect("decode succeeds despite trailers");
+    assert_eq!(decoded, samples);
+}
+
+#[test]
 fn corrupted_frame_crc_detected() {
     let n = 256;
     let samples = sine(n, 1, 44_100, 440.0, 4_000);

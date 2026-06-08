@@ -75,6 +75,26 @@ pub enum Error {
     /// hand-crafted [`crate::SeekPoint`] that violates the gate is
     /// rejected at typed-accessor lift time.
     InvalidInFrameSampleOffset(u32),
+    /// A hand-constructed [`crate::Id3v1Range`] failed the `spec/01`
+    /// §7 ID3v1 invariants: the length is not exactly 128, the byte
+    /// range is not anchored at `(file_len - 128, file_len)` (an
+    /// ID3v1 trailer is fixed-length and lives at the very end of
+    /// the file), or the `(start, len)` arithmetic overflows or
+    /// addresses bytes past the file end. The `(start, len)` pair
+    /// is reported as-supplied so the caller can correlate the
+    /// rejection back to the input. Surfaces only at typed-accessor
+    /// lift time on an ad-hoc literal; the `scan_trailers` parser
+    /// guarantees the invariant at construction.
+    InvalidId3v1Range(usize, usize),
+    /// A hand-constructed [`crate::ApeV2Range`] failed the `spec/01`
+    /// §7 APEv2 invariants: the length is below the 32-byte footer
+    /// minimum (an APEv2 region is at least a 32-byte footer per the
+    /// published APE tags header spec), or the `(start, len)`
+    /// arithmetic overflows or addresses bytes past the file end.
+    /// The `(start, len)` pair is reported as-supplied. Surfaces only
+    /// at typed-accessor lift time on an ad-hoc literal; the
+    /// `scan_trailers` parser guarantees the invariant at construction.
+    InvalidApeV2Range(usize, usize),
 }
 
 impl core::fmt::Display for Error {
@@ -132,6 +152,18 @@ impl core::fmt::Display for Error {
                 write!(
                     f,
                     "oxideav-tta: seek-point sample_offset_in_frame {v} is at or above the regular per-frame sample count"
+                )
+            }
+            Error::InvalidId3v1Range(start, len) => {
+                write!(
+                    f,
+                    "oxideav-tta: ID3v1 trailer range (start={start}, len={len}) does not satisfy the spec/01 §7 invariants (len must be exactly 128 and the range must be anchored at file end)"
+                )
+            }
+            Error::InvalidApeV2Range(start, len) => {
+                write!(
+                    f,
+                    "oxideav-tta: APEv2 trailer range (start={start}, len={len}) does not satisfy the spec/01 §7 invariants (len must be at least the 32-byte footer minimum and the range must lie within the file)"
                 )
             }
         }

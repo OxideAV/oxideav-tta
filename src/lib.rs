@@ -119,7 +119,7 @@ pub use crate::header::{
     BitsPerSample, ChannelCount, Format, FrameByteLength, FrameDescriptor, FrameGeometry,
     FrameSampleCount, SampleRate, StreamHeader, TotalSamples,
 };
-pub use crate::trailers::{detect_trailers, TrailerInfo};
+pub use crate::trailers::{detect_trailers, ApeV2Range, Id3v1Range, TrailerInfo};
 
 /// Re-exported alias for the parsed stream header. [`StreamInfo`] is
 /// the same type as [`StreamHeader`] under a more public-friendly
