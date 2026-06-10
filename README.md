@@ -8,7 +8,8 @@ Pure-Rust True Audio (TTA) lossless audio codec for the
 **Round 5 (+ r187 streaming surface, r204 format=2 streaming reach,
 r209 sample-keyed player-API sugar, r215 duration-keyed player-API
 sugar, r219 half-open sample/time range quartet, r261 typed
-`TrailerInfo` sub-field accessors) — clean-room encoder + decoder +
+`TrailerInfo` sub-field accessors, r262 aggregate `TypedStreamHeader`
+validated view) — clean-room encoder + decoder +
 framework integration + trace tape + format=2 + ID3v1/APEv2 trailer
 detection + multi-frame format=2 trace coverage + format=2
 streaming/random-access surface + `decode_from_sample` /
@@ -17,7 +18,8 @@ streaming/random-access surface + `decode_from_sample` /
 `frame_iter_sample_range` / `decode_time_range` /
 `frame_iter_time_range` + typed `Id3v1Range` / `ApeV2Range` on
 `TrailerInfo::id3v1_typed` / `apev2_typed` /
-`combined_byte_range` per `spec/01` §7.** Both encodes and decodes TTA1 format=1
+`combined_byte_range` per `spec/01` §7 + `StreamHeader::typed()` aggregate
+view per `spec/01` §3.** Both encodes and decodes TTA1 format=1
 (integer PCM) and format=2 (password-derived qm priming, `spec/07`)
 streams in pure safe Rust against the strict-isolation clean-room
 workspace at
@@ -768,3 +770,48 @@ Run locally with `cargo bench -p oxideav-tta --bench <decode|encode|roundtrip|st
   out-of-window literal rejection on both accessors. Lib tests: 164
   (default features) / 169 (all-features) / 155 (no-default-features).
   Integration tests unchanged at 9.
+
+## What round 262 adds on top
+
+- **Aggregate `TypedStreamHeader` validated view** per `spec/01` §3 —
+  the capstone of the round-240 → round-261 typed-accessor arc. The
+  per-field accessors require a caller that wants the complete
+  `spec/01` §3.1–§3.4 invariant set to check four separate `Result`s
+  (plus the infallible `total_samples` projection); the new
+  `StreamHeader::typed()` performs the same five lifts behind one
+  `Result`, returning a [`TypedStreamHeader`](src/header.rs) whose
+  fields are the existing validated newtypes (`Format` /
+  `ChannelCount` / `BitsPerSample` / `SampleRate` / `TotalSamples`).
+  Validation runs in the header's on-wire field order (`format`,
+  `channels`, `bits_per_sample`, `sample_rate` per the §3 table) —
+  the same order the byte-level parser checks — so an ad-hoc
+  `StreamHeader` literal with several out-of-range fields surfaces
+  the same first error variant `parse_stream_header_with_crc` would
+  have produced for the same raw values. Because every field is
+  in-range by construction, the derived projections are total (no
+  defensive zero-handling): `requires_password()` (`spec/07` §3
+  gate), `byte_depth()` (§3.2), `regular_frame_samples()` (§4.1),
+  `frame_geometry()` (typed, §4.1 — delegates to the round-251
+  projection on the round-tripped header so there is a single source
+  of arithmetic), `total_duration()` (§3.3/§3.4 nanosecond-grain
+  integer arithmetic), and the new `pcm_byte_len()` — the
+  `total_samples × channels × byte_depth` raw-PCM-buffer size of
+  `spec/01` §3.4's product rule, computed in `u64` because the
+  product overflows `u32` at the `(u32::MAX, 6ch, 3B)` envelope.
+  `to_header()` round-trips losslessly back to the raw on-wire data
+  model; no new `Error` variants (the aggregate reuses the per-field
+  rejection variants). Five new unit tests in `header::tests` pin the
+  field-by-field agreement with the individual lifts + every derived
+  projection, the rejection-order chain against the byte-level parser
+  on a five-case multi-invalid grid, the `pcm_byte_len` product rule
+  at the §8.1/§8.2 fixture shapes + empty stream + the u64-widening
+  envelope canary, the format=2 `requires_password` gate on a parsed
+  header, and the empty-stream degradation. One new integration test
+  in `roundtrip_tests` (`typed_stream_header_matches_parsed_stream`)
+  walks the same three-shape encoded-stream grid as the round-246 /
+  251 / 254 cross-checks and confirms the aggregate view agrees with
+  the raw fields, the decoder's own `total_duration` / frame-table
+  walk, and the §3.4 product rule against the actual interleaved
+  input PCM length. Lib tests: 188 (default features) / 193
+  (all-features) / 179 (no-default-features). Integration tests
+  unchanged at 9.

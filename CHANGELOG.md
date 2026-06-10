@@ -8,6 +8,51 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-262: aggregate `TypedStreamHeader` validated view per
+  `spec/01` §3 — the capstone of the round-240 → round-261
+  typed-accessor arc. New `StreamHeader::typed()` lifts all five §3
+  meta-data sub-fields into the existing validated newtypes
+  (`Format` / `ChannelCount` / `BitsPerSample` / `SampleRate` /
+  `TotalSamples`) behind a single `Result`, in the header's on-wire
+  field order (`format`, `channels`, `bits_per_sample`,
+  `sample_rate` per the §3 table — the same order the byte-level
+  parser checks), so an ad-hoc `StreamHeader` literal with several
+  out-of-range fields surfaces the same first error variant
+  `parse_stream_header_with_crc` would have produced for the same
+  raw values. Because every field of the aggregate is in-range by
+  construction, the derived projections are total:
+  `requires_password()` (`spec/07` §3 gate), `byte_depth()` (§3.2),
+  `regular_frame_samples()` (§4.1), `frame_geometry()` (typed §4.1
+  — delegates to the round-251 projection on the round-tripped
+  header, single source of arithmetic), `total_duration()`
+  (§3.3/§3.4 nanosecond-grain integer arithmetic), and the new
+  `pcm_byte_len()` — the `total_samples × channels × byte_depth`
+  raw-PCM-buffer size per `spec/01` §3.4's product rule, computed
+  in `u64` because the product overflows `u32` at the
+  `(total_samples = u32::MAX, channels = 6, byte_depth = 3)`
+  envelope. `to_header()` round-trips losslessly back to the raw
+  on-wire data model. No new `Error` variants — the aggregate
+  reuses the per-field rejection variants, so the
+  `tests/malformed_props.rs` exhaustive match is unchanged. Five
+  new unit tests in `header::tests` pin the field-by-field
+  agreement with the individual round-240/243 lifts plus every
+  derived projection, the rejection-order chain against the
+  byte-level parser on a five-case multi-invalid grid (including
+  the format=2-accepted branch), the `pcm_byte_len` product rule at
+  the `spec/01` §8.1 / §8.2 fixture shapes + the empty stream + the
+  u64-widening envelope canary, the format=2 `requires_password`
+  gate on a parsed header, and the empty-stream degradation
+  (`is_empty` propagation, 4-byte seek table per §4.4, zero
+  duration / zero PCM bytes). One new integration test in
+  `roundtrip_tests` (`typed_stream_header_matches_parsed_stream`)
+  walks the same three-shape encoded-stream grid as the round-246 /
+  round-251 / round-254 cross-checks and confirms the aggregate
+  view agrees with the raw fields it lifts, the decoder's own
+  `total_duration` / frame-table walk, and the §3.4 product rule
+  against the actual interleaved input PCM length. Lib tests: 188
+  (default features) / 193 (all-features) / 179
+  (no-default-features). Integration tests unchanged at 9.
+
 - Round-261: typed `TrailerInfo` sub-field accessors per `spec/01` §7.
   Lifts the two `pub` `Option<(usize, usize)>` byte-tuple fields on
   the existing round-4 `TrailerInfo` (`id3v1`, `apev2`) into validated

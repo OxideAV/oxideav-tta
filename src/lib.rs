@@ -117,7 +117,7 @@ pub use crate::encoder::{encode, encode_with_password};
 pub use crate::error::{Error, Result};
 pub use crate::header::{
     BitsPerSample, ChannelCount, Format, FrameByteLength, FrameDescriptor, FrameGeometry,
-    FrameSampleCount, SampleRate, StreamHeader, TotalSamples,
+    FrameSampleCount, SampleRate, StreamHeader, TotalSamples, TypedStreamHeader,
 };
 pub use crate::trailers::{detect_trailers, ApeV2Range, Id3v1Range, TrailerInfo};
 

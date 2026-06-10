@@ -2463,6 +2463,67 @@ fn frame_geometry_typed_matches_parsed_stream() {
 }
 
 #[test]
+fn typed_stream_header_matches_parsed_stream() {
+    // End-to-end cross-API agreement: encode a real stream, parse it
+    // via Decoder::new, and confirm the round-262 aggregate
+    // `StreamHeader::typed()` view agrees with (a) the raw fields it
+    // lifts, (b) the derived projections the decoder itself computes
+    // (`total_duration`, frame geometry), and (c) the spec/01 §3.4
+    // PCM-buffer product rule against the actual input PCM size.
+    //
+    // The same three-case parameter grid the round-246 / round-251 /
+    // round-254 cross-checks use, so the aggregate view is pinned
+    // against the same structurally-diverse shapes:
+    //   - mono 16-bit @ 44.1k, 2.5 s   => 3 frames (regular, regular, last)
+    //   - stereo 16-bit @ 48k, 2 s     => 2 frames (exact-multiple)
+    //   - mono 24-bit @ 44.1k, 1 s     => 1 frame (last == only)
+    let cases: &[(u32, u16, u16, u32)] = &[
+        // (total_samples, channels, bits_per_sample, sample_rate)
+        (110_250, 1, 16, 44_100),
+        (96_000, 2, 16, 48_000),
+        (44_100, 1, 24, 44_100),
+    ];
+    for &(total_samples, channels, bits_per_sample, sample_rate) in cases {
+        let samples = pseudo_noise(
+            total_samples as usize,
+            channels,
+            (1i32 << (bits_per_sample - 1)) - 1,
+            0xA66E_06A7_u64.wrapping_mul(total_samples as u64),
+        );
+        let tta = encode(&samples, channels, bits_per_sample, sample_rate).expect("encode");
+        let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+        let h = dec.header;
+        let t = h.typed().expect("typed() on parsed header");
+
+        // (a) Every typed field agrees with the raw field it lifts.
+        assert_eq!(t.format().as_raw(), h.format);
+        assert_eq!(t.channels().count(), h.channels);
+        assert_eq!(t.bits_per_sample().bits(), h.bits_per_sample);
+        assert_eq!(t.sample_rate().hz(), h.sample_rate);
+        assert_eq!(t.total_samples().count(), h.total_samples);
+        assert!(!t.requires_password(), "format=1 stream");
+
+        // (b) Derived projections agree with the decoder's own
+        // computations: duration and frame geometry.
+        assert_eq!(t.total_duration(), dec.total_duration());
+        let g = t.frame_geometry();
+        assert_eq!(g, h.frame_geometry_typed());
+        assert_eq!(g.frame_count() as usize, dec.frames.len());
+        assert_eq!(t.regular_frame_samples(), h.regular_frame_samples());
+
+        // (c) spec/01 §3.4 product rule: the PCM byte budget equals
+        // the interleaved input length times the byte depth.
+        assert_eq!(
+            t.pcm_byte_len(),
+            (samples.len() as u64) * (t.byte_depth() as u64)
+        );
+
+        // Lossless round-trip back to the raw on-wire data model.
+        assert_eq!(t.to_header(), h);
+    }
+}
+
+#[test]
 fn seek_point_typed_accessors_match_parsed_stream() {
     // End-to-end cross-API agreement: walk a real multi-frame stream's
     // worth of seek points (one per (frame_index, in_frame_offset)

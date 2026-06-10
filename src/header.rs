@@ -381,6 +381,172 @@ impl StreamHeader {
     pub fn total_duration(&self) -> core::time::Duration {
         self.total_samples_typed().duration_at(self.sample_rate)
     }
+
+    /// Lifts **every** constrained sub-field into its typed accessor in
+    /// one call, producing the [`TypedStreamHeader`] aggregate view.
+    ///
+    /// Equivalent to calling [`Self::format_typed`] /
+    /// [`Self::channel_count_typed`] / [`Self::bits_per_sample_typed`] /
+    /// [`Self::sample_rate_typed`] / [`Self::total_samples_typed`]
+    /// individually, but the five lifts are threaded together so a
+    /// caller that wants the spec's full `spec/01` §3 invariant set
+    /// checks one `Result` instead of four. Validation runs in the
+    /// header's on-wire field order (`format`, `channels`,
+    /// `bits_per_sample`, `sample_rate` per the §3 table), which is
+    /// also the order [`parse_stream_header_with_crc`] checks — an
+    /// ad-hoc [`StreamHeader`] literal with several out-of-range
+    /// fields surfaces the same first error the parser would.
+    pub fn typed(&self) -> Result<TypedStreamHeader> {
+        TypedStreamHeader::from_header(self)
+    }
+}
+
+/// Aggregate typed view of a [`StreamHeader`] — all five meta-data
+/// sub-fields of `spec/01` §3 lifted into their validated typed
+/// accessors ([`Format`] / [`ChannelCount`] / [`BitsPerSample`] /
+/// [`SampleRate`] / [`TotalSamples`]) in a single construction.
+///
+/// The round-240 / round-243 per-field accessors require a caller that
+/// wants the complete invariant set to check four separate `Result`s
+/// (plus the infallible `total_samples` projection). This aggregate
+/// performs the same five lifts behind one `Result`, in the same
+/// field order the parser validates (`spec/01` §3 table order:
+/// `format`, `channels`, `bits_per_sample`, `sample_rate`), so the
+/// first error surfaced from an ad-hoc literal matches what
+/// [`parse_stream_header_with_crc`] would have produced for the same
+/// raw values.
+///
+/// By construction every field of a `TypedStreamHeader` is within its
+/// `spec/01` §3.1–§3.4 documented range, so the derived projections
+/// ([`Self::byte_depth`], [`Self::regular_frame_samples`],
+/// [`Self::frame_geometry`], [`Self::total_duration`],
+/// [`Self::pcm_byte_len`]) are total — no per-call validation or
+/// defensive zero-handling is needed once the view exists.
+///
+/// The raw [`StreamHeader`] stays the on-wire data model; the
+/// aggregate is purely additive and round-trips back via
+/// [`Self::to_header`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypedStreamHeader {
+    format: Format,
+    channels: ChannelCount,
+    bits_per_sample: BitsPerSample,
+    sample_rate: SampleRate,
+    total_samples: TotalSamples,
+}
+
+impl TypedStreamHeader {
+    /// Lift all five sub-fields of `header` into the aggregate typed
+    /// view. Validation order matches the parser's field-check order
+    /// (`spec/01` §3 table order): `format` (§3.1), `channels` (§3),
+    /// `bits_per_sample` (§3.2), `sample_rate` (§3.3);
+    /// `total_samples` (§3.4) is infallible. The first out-of-range
+    /// field's error is returned, matching the variant
+    /// [`parse_stream_header_with_crc`] surfaces for the same raw
+    /// value.
+    pub fn from_header(header: &StreamHeader) -> Result<Self> {
+        let format = Format::from_raw(header.format)?;
+        let channels = ChannelCount::from_raw(header.channels)?;
+        let bits_per_sample = BitsPerSample::from_raw(header.bits_per_sample)?;
+        let sample_rate = SampleRate::from_raw(header.sample_rate)?;
+        let total_samples = TotalSamples::from_raw(header.total_samples);
+        Ok(TypedStreamHeader {
+            format,
+            channels,
+            bits_per_sample,
+            sample_rate,
+            total_samples,
+        })
+    }
+
+    /// Typed `format` field (`spec/01` §3.1).
+    pub fn format(&self) -> Format {
+        self.format
+    }
+
+    /// Typed `channels` field (`spec/01` §3, `1..=6`).
+    pub fn channels(&self) -> ChannelCount {
+        self.channels
+    }
+
+    /// Typed `bits_per_sample` field (`spec/01` §3.2, `16..=24`).
+    pub fn bits_per_sample(&self) -> BitsPerSample {
+        self.bits_per_sample
+    }
+
+    /// Typed `sample_rate` field (`spec/01` §3.3, `1..=0x7FFFFF`).
+    pub fn sample_rate(&self) -> SampleRate {
+        self.sample_rate
+    }
+
+    /// Typed `total_samples` field (`spec/01` §3.4).
+    pub fn total_samples(&self) -> TotalSamples {
+        self.total_samples
+    }
+
+    /// `true` for `format == 2` streams (password-derived qm priming
+    /// per `spec/07` §3). Delegates to [`Format::requires_password`].
+    pub fn requires_password(&self) -> bool {
+        self.format.requires_password()
+    }
+
+    /// `byte_depth = (bits_per_sample + 7) / 8` per `spec/01` §3.2 —
+    /// always `2` or `3`. Delegates to [`BitsPerSample::byte_depth`].
+    pub fn byte_depth(&self) -> usize {
+        self.bits_per_sample.byte_depth()
+    }
+
+    /// Per-channel samples in a regular (non-last) frame:
+    /// `floor(sample_rate * 256 / 245)` per `spec/01` §4.1. Delegates
+    /// to [`SampleRate::regular_frame_samples`].
+    pub fn regular_frame_samples(&self) -> u32 {
+        self.sample_rate.regular_frame_samples()
+    }
+
+    /// Typed frame geometry per `spec/01` §4.1, identical to
+    /// [`StreamHeader::frame_geometry_typed`] on the round-tripped
+    /// header (single source of arithmetic — the aggregate does not
+    /// re-derive the closed form).
+    pub fn frame_geometry(&self) -> FrameGeometry {
+        self.to_header().frame_geometry_typed()
+    }
+
+    /// Playback duration per `spec/01` §3.3 / §3.4, identical to
+    /// [`StreamHeader::total_duration`] on the round-tripped header.
+    /// Delegates to [`TotalSamples::duration_at`]; total because
+    /// `sample_rate >= 1` by construction.
+    pub fn total_duration(&self) -> core::time::Duration {
+        self.total_samples.duration_at(self.sample_rate.hz())
+    }
+
+    /// Size in bytes of the raw PCM buffer corresponding to the whole
+    /// stream: `total_samples * channels * byte_depth` per `spec/01`
+    /// §3.4 ("the product of `total_samples` and `byte_depth *
+    /// channels` gives the size of the corresponding raw PCM buffer").
+    ///
+    /// Computed in `u64` because the product overflows `u32` at the
+    /// upper end of the envelope (`total_samples = u32::MAX`,
+    /// `channels = 6`, `byte_depth = 3`). This is the buffer size a
+    /// caller passes to [`crate::pack_pcm`]-style sinks or uses to
+    /// pre-size a transcode target.
+    pub fn pcm_byte_len(&self) -> u64 {
+        (self.total_samples.count() as u64)
+            * (self.channels.count() as u64)
+            * (self.byte_depth() as u64)
+    }
+
+    /// Round-trip back to the raw on-wire [`StreamHeader`] data model.
+    /// Lossless: the aggregate carries exactly the five §3 meta-data
+    /// fields and nothing else.
+    pub fn to_header(&self) -> StreamHeader {
+        StreamHeader {
+            format: self.format.as_raw(),
+            channels: self.channels.count(),
+            bits_per_sample: self.bits_per_sample.bits(),
+            sample_rate: self.sample_rate.hz(),
+            total_samples: self.total_samples.count(),
+        }
+    }
 }
 
 /// Typed wrapper around a [`FrameDescriptor`]'s `disk_size` field —
@@ -1522,6 +1688,197 @@ mod tests {
             };
             assert_eq!(g.frame_samples_at(idx), Some(expected));
         }
+    }
+
+    #[test]
+    fn typed_stream_header_matches_individual_lifts() {
+        // The aggregate lift agrees field-by-field with the per-field
+        // round-240/243 accessors and with the raw fields they lift,
+        // and every derived projection agrees with its StreamHeader
+        // sibling. to_header round-trips losslessly.
+        let buf = build_header_bytes(1, 2, 16, 44_100, 88_200);
+        let (h, _) = parse_stream_header(&buf).unwrap();
+        let t = h.typed().unwrap();
+        assert_eq!(t.format(), h.format_typed().unwrap());
+        assert_eq!(t.format().as_raw(), h.format);
+        assert_eq!(t.channels(), h.channel_count_typed().unwrap());
+        assert_eq!(t.channels().count(), h.channels);
+        assert_eq!(t.bits_per_sample(), h.bits_per_sample_typed().unwrap());
+        assert_eq!(t.bits_per_sample().bits(), h.bits_per_sample);
+        assert_eq!(t.sample_rate(), h.sample_rate_typed().unwrap());
+        assert_eq!(t.sample_rate().hz(), h.sample_rate);
+        assert_eq!(t.total_samples(), h.total_samples_typed());
+        assert_eq!(t.total_samples().count(), h.total_samples);
+        // Derived projections agree with the StreamHeader equivalents.
+        assert!(!t.requires_password());
+        assert_eq!(t.byte_depth(), h.bytes_per_sample());
+        assert_eq!(t.regular_frame_samples(), h.regular_frame_samples());
+        assert_eq!(t.frame_geometry(), h.frame_geometry_typed());
+        assert_eq!(t.total_duration(), h.total_duration());
+        // 88_200 samples * 2 ch * 2 bytes = 352_800 PCM bytes per
+        // spec/01 §3.4's product rule.
+        assert_eq!(t.pcm_byte_len(), 352_800);
+        // Lossless round-trip back to the raw data model.
+        assert_eq!(t.to_header(), h);
+    }
+
+    #[test]
+    fn typed_stream_header_rejection_order_matches_parser() {
+        // Validation order is the parser's field-check order (spec/01
+        // §3 table order: format, channels, bits_per_sample,
+        // sample_rate). For each ad-hoc literal carrying multiple
+        // out-of-range fields, the aggregate lift surfaces the same
+        // FIRST error variant the byte-level parser produces for the
+        // same raw values.
+        let cases: &[(u16, u16, u16, u32)] = &[
+            // (format, channels, bits_per_sample, sample_rate)
+            (0, 0, 8, 0),       // everything bogus => format fires first
+            (1, 0, 8, 0),       // format ok => channels fires
+            (1, 1, 8, 0),       // channels ok => bits_per_sample fires
+            (1, 1, 16, 0),      // bps ok => sample_rate fires
+            (2, 7, 32, 44_100), // format=2 is accepted; channels fires
+        ];
+        for &(format, channels, bits_per_sample, sample_rate) in cases {
+            let h = StreamHeader {
+                format,
+                channels,
+                bits_per_sample,
+                sample_rate,
+                total_samples: 0,
+            };
+            let typed_err = h.typed().unwrap_err();
+            // Byte-level parser on the same raw values (CRC freshly
+            // computed so the parse reaches the field checks).
+            let buf = build_header_bytes(format, channels, bits_per_sample, sample_rate, 0);
+            let parser_err = parse_stream_header_any_format(&buf).unwrap_err();
+            assert_eq!(
+                format!("{typed_err:?}"),
+                format!("{parser_err:?}"),
+                "typed() and parser must surface the same first error for \
+                 ({format}, {channels}, {bits_per_sample}, {sample_rate})"
+            );
+        }
+        // Spot-check the variants themselves on the ordered chain.
+        assert!(matches!(
+            StreamHeader {
+                format: 0,
+                channels: 0,
+                bits_per_sample: 8,
+                sample_rate: 0,
+                total_samples: 0,
+            }
+            .typed(),
+            Err(Error::UnsupportedFormat(0))
+        ));
+        assert!(matches!(
+            StreamHeader {
+                format: 1,
+                channels: 0,
+                bits_per_sample: 8,
+                sample_rate: 0,
+                total_samples: 0,
+            }
+            .typed(),
+            Err(Error::UnsupportedChannelCount(0))
+        ));
+        assert!(matches!(
+            StreamHeader {
+                format: 1,
+                channels: 1,
+                bits_per_sample: 8,
+                sample_rate: 0,
+                total_samples: 0,
+            }
+            .typed(),
+            Err(Error::UnsupportedBitDepth(8))
+        ));
+        assert!(matches!(
+            StreamHeader {
+                format: 1,
+                channels: 1,
+                bits_per_sample: 16,
+                sample_rate: 0,
+                total_samples: 0,
+            }
+            .typed(),
+            Err(Error::UnsupportedSampleRate(0))
+        ));
+    }
+
+    #[test]
+    fn typed_stream_header_pcm_byte_len() {
+        // spec/01 §8.1 canonical fixture shape: 44_100 samples, 1 ch,
+        // 16-bit => byte_depth 2 => 88_200 raw PCM bytes (the WAV data
+        // size of the 1 s mono source).
+        let h = StreamHeader {
+            format: 1,
+            channels: 1,
+            bits_per_sample: 16,
+            sample_rate: 44_100,
+            total_samples: 44_100,
+        };
+        assert_eq!(h.typed().unwrap().pcm_byte_len(), 88_200);
+        // 24-bit mono (spec/01 §8.2 shape): byte_depth 3 => 132_300.
+        let h24 = StreamHeader {
+            bits_per_sample: 24,
+            ..h
+        };
+        assert_eq!(h24.typed().unwrap().pcm_byte_len(), 132_300);
+        // Empty stream (spec/01 §3.4): zero bytes.
+        let empty = StreamHeader {
+            total_samples: 0,
+            ..h
+        };
+        assert_eq!(empty.typed().unwrap().pcm_byte_len(), 0);
+        // Envelope canary: u32::MAX samples * 6 ch * 3 bytes overflows
+        // u32 — the u64 widening must hold the exact product.
+        let envelope = StreamHeader {
+            format: 1,
+            channels: 6,
+            bits_per_sample: 24,
+            sample_rate: MAX_SAMPLE_RATE,
+            total_samples: u32::MAX,
+        };
+        let expected = (u32::MAX as u64) * 6 * 3;
+        assert_eq!(envelope.typed().unwrap().pcm_byte_len(), expected);
+    }
+
+    #[test]
+    fn typed_stream_header_format2_requires_password() {
+        // A parsed format=2 header lifts to an aggregate whose
+        // requires_password gate fires (spec/07 §3 priming discipline);
+        // format=1 does not.
+        let buf2 = build_header_bytes(2, 2, 16, 44_100, 44_100);
+        let (h2, _) = parse_stream_header_any_format(&buf2).unwrap();
+        let t2 = h2.typed().unwrap();
+        assert_eq!(t2.format(), Format::Encrypted);
+        assert!(t2.requires_password());
+        let buf1 = build_header_bytes(1, 2, 16, 44_100, 44_100);
+        let (h1, _) = parse_stream_header_any_format(&buf1).unwrap();
+        let t1 = h1.typed().unwrap();
+        assert_eq!(t1.format(), Format::Simple);
+        assert!(!t1.requires_password());
+        // Round-trips preserve the format byte.
+        assert_eq!(t2.to_header().format, 2);
+        assert_eq!(t1.to_header().format, 1);
+    }
+
+    #[test]
+    fn typed_stream_header_empty_stream() {
+        // total_samples = 0 is structurally valid per spec/01 §3.4;
+        // every projection on the aggregate view degrades cleanly.
+        let buf = build_header_bytes(1, 1, 16, 44_100, 0);
+        let (h, _) = parse_stream_header(&buf).unwrap();
+        let t = h.typed().unwrap();
+        assert!(t.total_samples().is_empty());
+        assert!(t.frame_geometry().is_empty());
+        assert_eq!(t.frame_geometry().frame_count(), 0);
+        // Empty stream still carries the bare seek-table CRC on disk
+        // (spec/01 §4.4).
+        assert_eq!(t.frame_geometry().seek_table_size_bytes(), 4);
+        assert_eq!(t.total_duration(), core::time::Duration::ZERO);
+        assert_eq!(t.pcm_byte_len(), 0);
+        assert_eq!(t.to_header(), h);
     }
 
     #[test]
