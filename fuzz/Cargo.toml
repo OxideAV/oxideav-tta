@@ -56,6 +56,18 @@ cargo-fuzz = true
 #   `SampleIndexOutOfRange` (panic-free typed rejection); (vi)
 #   `decode_time_range(Duration::ZERO, total_duration)` equals
 #   `decode_all`.
+# - **`typed_header`** (round 276): differential check between the two
+#   independent `spec/01` §3 validators — the byte-level parser behind
+#   `Decoder::new` and the round-240..262 typed-accessor lift
+#   (`StreamHeader::typed()` + the per-field `*_typed` accessors).
+#   Synthesizes a 22-byte on-wire header (valid magic + valid CRC32)
+#   from attacker-chosen raw fields and asserts both paths surface the
+#   SAME first error in §3 table order, that every derived projection
+#   on the aggregate view (`to_header` round-trip, `byte_depth`,
+#   `regular_frame_samples`, `total_duration`, `pcm_byte_len`,
+#   `FrameGeometry` §4.1 invariants) agrees with its raw-header
+#   sibling, and that the `FrameDescriptor` / `SeekPoint` lifts accept
+#   exactly their documented windows.
 [dependencies]
 libfuzzer-sys = "0.4"
 
@@ -102,5 +114,11 @@ doc = false
 [[bin]]
 name = "sample_range"
 path = "fuzz_targets/sample_range.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "typed_header"
+path = "fuzz_targets/typed_header.rs"
 test = false
 doc = false

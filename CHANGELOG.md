@@ -8,6 +8,44 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-276: `typed_header` cargo-fuzz target — a differential check
+  between the two independent `spec/01` §3 validators: the byte-level
+  parser behind `Decoder::new` (magic + CRC32 + inline field-range
+  checks) and the round-240..262 typed-accessor lift
+  (`StreamHeader::typed()` + the per-field `*_typed` accessors). The
+  harness synthesizes a 22-byte on-wire header (valid magic + valid
+  IEEE-802.3 CRC32 per `spec/01` §6, so field validation is the only
+  rejection path) from attacker-chosen raw fields and asserts: (i)
+  `typed()` is `Ok` iff every per-field lift is `Ok`, and on `Err`
+  carries the FIRST per-field error in §3 table order; (ii) the
+  byte-level parser surfaces exactly the same error variant for the
+  same raw values, and on a field-valid header proceeds past field
+  validation (format=2 → `PasswordRequired`, with the
+  password-lifted constructor reaching the seek table; format=1 →
+  `Truncated` at the absent seek table); (iii) every derived
+  projection on the aggregate view agrees with its raw-header
+  sibling (`to_header()` round-trip, `byte_depth`,
+  `regular_frame_samples`, 3-way `total_duration` agreement,
+  `pcm_byte_len` §3.4 product rule) plus the full `FrameGeometry`
+  §4.1 invariant set (`1 ≤ last ≤ regular`, closed-form
+  `(fc−1)·regular + last == total_samples`, `frame_samples_at` at
+  first/interior/last/past-end, `seek_table_size_bytes == 4·fc + 4`,
+  exact-multiple predicate, empty-stream degradation); (iv) the
+  `FrameDescriptor` lifts (`disk_size_typed` / `sample_count_typed`)
+  and `SeekPoint` lifts (`frame_index_typed` / `sample_offset_typed`)
+  accept exactly their documented windows against a geometry derived
+  from in-range fields, with round-trip / `is_last` /
+  `is_frame_boundary` / `interleaved_skip` agreement; (v) the
+  infallible accessors stay total (no panic) for ANY raw field
+  combination, including the `sample_rate == 0` degenerate. Every
+  iteration runs both a raw (mostly out-of-range) pass and a
+  folded-into-valid-windows pass so the typed-Ok projection set is
+  exercised on every input. Three seeds under
+  `fuzz/corpus/typed_header/` cover the canonical stereo16-44.1k
+  shape, the `(u32::MAX, 6ch, 24-bit, 0x7FFFFF Hz)` format=2 upper
+  envelope, and an all-fields-invalid header. 34.5M execs in 90 s
+  clean.
+
 - Round-262: aggregate `TypedStreamHeader` validated view per
   `spec/01` §3 — the capstone of the round-240 → round-261
   typed-accessor arc. New `StreamHeader::typed()` lifts all five §3

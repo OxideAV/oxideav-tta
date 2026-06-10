@@ -9,7 +9,8 @@ Pure-Rust True Audio (TTA) lossless audio codec for the
 r209 sample-keyed player-API sugar, r215 duration-keyed player-API
 sugar, r219 half-open sample/time range quartet, r261 typed
 `TrailerInfo` sub-field accessors, r262 aggregate `TypedStreamHeader`
-validated view) — clean-room encoder + decoder +
+validated view, r276 `typed_header` differential fuzz target) —
+clean-room encoder + decoder +
 framework integration + trace tape + format=2 + ID3v1/APEv2 trailer
 detection + multi-frame format=2 trace coverage + format=2
 streaming/random-access surface + `decode_from_sample` /
@@ -307,7 +308,7 @@ clean-room workspace.
 
 ## Fuzzing
 
-Four [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) harnesses
+Six [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) harnesses
 live under `fuzz/fuzz_targets/`:
 
 - **`decode`** (round 124) — feeds arbitrary bytes to both
@@ -389,6 +390,39 @@ live under `fuzz/fuzz_targets/`:
   start, 7K+ iters per 60 s with the seeded corpus (per-iteration
   cost is heavy because every input forces multiple eager
   `decode_all` passes for the agreement check).
+- **`typed_header`** (round 276) — differential check between the two
+  independent `spec/01` §3 validators: the byte-level parser behind
+  [`Decoder::new`](src/decoder.rs) and the round-240..262
+  typed-accessor lift ([`StreamHeader::typed()`](src/header.rs) + the
+  per-field `*_typed` accessors). Each iteration synthesizes a
+  22-byte on-wire header (valid magic + valid IEEE-802.3 CRC32 per
+  `spec/01` §6, so field validation is the only rejection path) from
+  attacker-chosen raw fields and asserts (i) `typed()` is `Ok` iff
+  every per-field lift is `Ok`, with the FIRST per-field error in §3
+  table order on `Err`; (ii) the byte-level parser surfaces exactly
+  the same error variant for the same raw values (and on field-valid
+  headers proceeds past field validation — format=2 →
+  `PasswordRequired` with the password-lifted constructor reaching
+  the seek table, format=1 → `Truncated` at the absent seek table);
+  (iii) every derived projection on the aggregate view agrees with
+  its raw-header sibling (`to_header()` round-trip, `byte_depth`,
+  `regular_frame_samples`, 3-way `total_duration`, `pcm_byte_len`
+  §3.4 product rule) plus the full `FrameGeometry` §4.1 invariant set
+  (`1 ≤ last ≤ regular`, closed-form `(fc−1)·regular + last ==
+  total_samples`, `frame_samples_at` at first/interior/last/past-end,
+  `seek_table_size_bytes == 4·fc + 4`, exact-multiple predicate,
+  empty-stream degradation); (iv) the `FrameDescriptor` /
+  `SeekPoint` typed lifts accept exactly their documented windows
+  against an in-range geometry; (v) the infallible accessors stay
+  total (no panic) for ANY raw field combination, including the
+  `sample_rate == 0` degenerate the parser would have rejected. Both
+  a raw (mostly out-of-range) and a folded-into-valid-windows pass
+  run on every input so the typed-Ok projection set is always
+  reached. Three seeds under `fuzz/corpus/typed_header/` cover the
+  canonical stereo16-44.1k shape, the `(u32::MAX, 6ch, 24-bit,
+  0x7FFFFF Hz)` format=2 upper envelope, and an all-fields-invalid
+  header. 34.5M execs in 90 s clean (the surface is pure header
+  arithmetic — no entropy decode — so throughput is ~380K exec/s).
 
 The harness body is clean-room (no reference-implementation
 oracle). Run locally with `cargo +nightly fuzz run <target>`; the
