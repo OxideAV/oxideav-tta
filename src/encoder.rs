@@ -32,7 +32,6 @@ use crate::error::{Error, Result};
 use crate::lms::LmsState;
 use crate::rice::{zigzag, RiceState};
 use crate::stage_b::StageBState;
-use crate::tables;
 
 /// Maximum supported channels per `spec/01` §3 (mirrors the decoder's
 /// `MAX_NCH`).
@@ -239,15 +238,13 @@ fn encode_one_frame(
 /// encoder knows the true sample), which keeps the decoder's
 /// `s_A = e + p_A` consistent on the symmetric replay.
 fn lms_step_encode(state: &mut LmsState, s_a_in: i32) -> i32 {
-    // STEP 1 — sign-LMS qm update gated on the previous step's residual.
-    if state.error > 0 {
-        for i in 0..8 {
-            state.qm[i] = state.qm[i].wrapping_add(state.dx[i]);
-        }
-    } else if state.error < 0 {
-        for i in 0..8 {
-            state.qm[i] = state.qm[i].wrapping_sub(state.dx[i]);
-        }
+    // STEP 1 — sign-LMS qm update gated on the previous step's
+    // residual. Branch-free `qm[i] += sign(error) * dx[i]`, mirroring
+    // `LmsState::step` (see the rationale there): identical wrapping
+    // result, no per-sample data-dependent branch.
+    let sgn = (state.error > 0) as i32 - (state.error < 0) as i32;
+    for i in 0..8 {
+        state.qm[i] = state.qm[i].wrapping_add(sgn.wrapping_mul(state.dx[i]));
     }
     // STEP 2 — prediction.
     let mut sum: i32 = state.round;
@@ -261,11 +258,12 @@ fn lms_step_encode(state: &mut LmsState, s_a_in: i32) -> i32 {
         state.dl[i] = state.dl[i + 1];
     }
     let dl_pre = [state.dl[4], state.dl[5], state.dl[6], state.dl[7]];
-    // STEP 4 — regenerate dx[4..7].
-    let dx_mags = tables::lms_dx_magnitudes();
-    for k in 0..4 {
-        let mag = dx_mags[k];
-        state.dx[4 + k] = if dl_pre[k] < 0 { -mag } else { mag };
+    // STEP 4 — regenerate dx[4..7]. Uses the magnitudes cached on the
+    // state at frame init (see `LmsState::dx_mags`) so the per-sample
+    // loop skips the lazy-table synchronisation check.
+    let mags = state.dx_mags;
+    for ((d, mag), dlp) in state.dx[4..].iter_mut().zip(mags).zip(dl_pre) {
+        *d = if dlp < 0 { -mag } else { mag };
     }
     // STEP 5 — residual feedback + dl[4..7] regeneration. The encoder
     // uses `s_a_in` directly (= `e + p_A`); this matches what the

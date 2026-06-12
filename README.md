@@ -9,7 +9,8 @@ Pure-Rust True Audio (TTA) lossless audio codec for the
 r209 sample-keyed player-API sugar, r215 duration-keyed player-API
 sugar, r219 half-open sample/time range quartet, r261 typed
 `TrailerInfo` sub-field accessors, r262 aggregate `TypedStreamHeader`
-validated view, r276 `typed_header` differential fuzz target) —
+validated view, r276 `typed_header` differential fuzz target, r285
+profile-guided Stage-A LMS optimization, −18% decode wall time) —
 clean-room encoder + decoder +
 framework integration + trace tape + format=2 + ID3v1/APEv2 trailer
 detection + multi-frame format=2 trace coverage + format=2
@@ -849,3 +850,69 @@ Run locally with `cargo bench -p oxideav-tta --bench <decode|encode|roundtrip|st
   input PCM length. Lib tests: 188 (default features) / 193
   (all-features) / 179 (no-default-features). Integration tests
   unchanged at 9.
+
+## What round 285 adds on top
+
+- **Profile-guided Stage-A LMS optimization (depth mode:
+  profile-opt)** — decoded PCM and encoded streams both bit-identical
+  before/after; −18% total decode wall time on the five-scenario
+  corpus.
+
+  *Profiling*: `examples/profile_decode.rs` (new) synthesises the
+  same deterministic xorshift corpus the Criterion benches use
+  (mono16/stereo16/stereo24/6ch16/format=2), decodes each stream N
+  times, and prints an FNV-1a-64 hash of the encoded bytes AND of the
+  decoded interleaved PCM — it is simultaneously the sampling-profiler
+  target and the bit-identity oracle for optimization commits. A
+  temporary `#[inline(never)]` build attributed the decode cost:
+  Stage-A `LmsState::step_traced` ranked #1 (2 249 of ~6 000 in-decode
+  samples, ~36%), ahead of `BitReader::read_unary` (1 907),
+  `rice::decode_one_traced` (914), `read_bits` (666), with
+  `decorr::inverse` and Stage-B in the noise floor.
+
+  *Optimization* (all three changes confined to the ranked-#1 LMS
+  step; spec §4.2 STEP 1..5 semantics unchanged, all arithmetic
+  still wrapping-exact):
+
+  1. `LmsState::step` is now the single authoritative lean
+     implementation; `step_traced` became the wrapper that snapshots
+     pre/post state around it (trace builds only pay the snapshot
+     cost; non-trace builds no longer funnel through the trace
+     struct). `predicted_a` is recovered as `s_A − e`, exact under
+     wrapping arithmetic.
+  2. The spec §4.5 dx-regeneration magnitudes are copied out of the
+     lazily-parsed `tables/lms-dx-magnitudes.csv` snapshot ONCE per
+     frame init into a new private `LmsState::dx_mags` field —
+     previously STEP 4 paid a synchronised lazy-init check on every
+     sample × channel. The CSV-sourced table policy is preserved.
+  3. STEP 1's sign-gated qm update is branch-free:
+     `qm[i] += sign(error) · dx[i]` with `sign ∈ {−1, 0, +1}`
+     computes the identical wrapping result as the three-way gate
+     (`+dx` / `−dx` / `+0`) without the per-sample data-dependent
+     branch — residual signs on noise-like audio are close to random,
+     so the gate was a steady misprediction source. The same rewrite
+     applies to the encoder's symmetric `lms_step_encode`.
+
+  *Measured* (interleaved A/B, 5×100 iterations per binary, release,
+  Apple Silicon dev machine; medians): total decode wall time for the
+  corpus 604.4 ms → 494.4 ms (−18.2%). Per scenario (per-iteration):
+  mono16-44k1-1s 793 µs → 636 µs (−19.8%), stereo16-44k1-1s
+  1.534 ms → 1.318 ms (−14.1%), stereo24-48k-500ms 848 µs → 683 µs
+  (−19.6%), 6ch16-48k-250ms 1.306 ms → 1.020 ms (−21.8%),
+  stereo16-format2-1s 1.572 ms → 1.294 ms (−17.7%). A post-change
+  `#[inline(never)]` re-profile shows the LMS step dropped from
+  rank #1 (2 249 samples) to rank #5 (616 samples, −3.6×); the new
+  #1 is `BitReader::read_unary` (2 504) — the natural target for a
+  future profile round.
+
+  *Bit-identity evidence*: all five corpus `enc_hash` values
+  (`295c4380dec8353c`, `73fe9cd2174448d5`, `fd9282f66b63eb68`,
+  `af4484f1cfd66203`, `05b0e07312982e51`) and all five `pcm_hash`
+  values (`d6674d565e0c1d36`, `620656ad8b609180`,
+  `3dfb2740f26271ca`, `4d329442f69d713c`, `620656ad8b609180`) are
+  byte-for-byte identical between the pre- and post-optimization
+  builds, covering decoder AND encoder (the encoder shares the
+  Stage-A step). Full test matrix green: 188 lib tests (default) /
+  193 (`--features trace`, which exercises the reshaped
+  `step_traced`) / 179 (`--no-default-features`), + 9 integration
+  tests each.

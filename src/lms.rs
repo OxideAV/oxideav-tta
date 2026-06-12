@@ -28,6 +28,15 @@ pub struct LmsState {
     pub error: i32,
     pub shift: i32,
     pub round: i32,
+    /// STEP 4 regeneration magnitudes for taps 4..7 (spec §4.5),
+    /// copied out of the lazily-parsed `tables/lms-dx-magnitudes.csv`
+    /// snapshot ONCE at frame init. Round-285 profiling showed the
+    /// previous per-step `tables::lms_dx_magnitudes()` call paying a
+    /// synchronised lazy-init check on every sample × channel inside
+    /// the hottest decode function; caching the four constants here
+    /// keeps the CSV-sourced table policy while moving that check out
+    /// of the inner loop.
+    pub(crate) dx_mags: [i32; 4],
 }
 
 impl LmsState {
@@ -44,43 +53,30 @@ impl LmsState {
             error: 0,
             shift,
             round,
+            dx_mags: *tables::lms_dx_magnitudes(),
         }
     }
 
     /// One Stage-A step: consume residual `e`, return the
     /// reconstructed sample `s_A = e + p_A`. Updates the state in
     /// place per spec §4.2 STEPs 1..5.
-    #[allow(dead_code)] // direct callers vanish under `--features trace`.
-    pub fn step(&mut self, e: i32) -> i32 {
-        self.step_traced(e).sample_after_a
-    }
-
-    /// Same as [`Self::step`] but also returns the intermediate values
-    /// needed to populate `LMS_PRE`, `STAGE_A_PREDICT`, and `LMS_POST`
-    /// trace events per `spec/06-trace-contract.md` §5.4.
     ///
-    /// `LmsTrace.dl_pre` / `dx_pre` / `qm_pre` are the snapshots taken
-    /// **before** the step modifies the state; `dl_post` / `dx_post` /
-    /// `qm_post` are the post-update state copied straight off `self`.
-    /// `error_pre` is the value of `self.error` at function entry (=
-    /// the previous step's residual, which gates the STEP 1 sign-LMS
-    /// update).
-    pub fn step_traced(&mut self, e: i32) -> LmsTrace {
-        let dl_pre_full = self.dl;
-        let dx_pre_full = self.dx;
-        let qm_pre_full = self.qm;
-        let error_pre = self.error;
-
+    /// This is the single authoritative implementation of the
+    /// five-step update; [`Self::step_traced`] wraps it with pre/post
+    /// state snapshots for the spec/06 trace emitter.
+    #[inline]
+    pub fn step(&mut self, e: i32) -> i32 {
         // STEP 1 — sign-LMS qm update gated on the previous step's
-        // residual, currently held in `self.error`.
-        if self.error > 0 {
-            for i in 0..8 {
-                self.qm[i] = self.qm[i].wrapping_add(self.dx[i]);
-            }
-        } else if self.error < 0 {
-            for i in 0..8 {
-                self.qm[i] = self.qm[i].wrapping_sub(self.dx[i]);
-            }
+        // residual, currently held in `self.error`. Implemented
+        // branch-free as `qm[i] += sign(error) * dx[i]`: residual
+        // signs on real audio are close to random, so the spec's
+        // three-way gate costs a hard-to-predict branch per sample —
+        // multiplying by sign ∈ {-1, 0, +1} computes the identical
+        // wrapping result (`+dx`, `-dx`, or `+0`) and vectorises with
+        // the STEP 2 dot product.
+        let sgn = (self.error > 0) as i32 - (self.error < 0) as i32;
+        for i in 0..8 {
+            self.qm[i] = self.qm[i].wrapping_add(sgn.wrapping_mul(self.dx[i]));
         }
         // STEP 2 — prediction (dot product with rounding addend, then
         // arithmetic right shift).
@@ -100,10 +96,9 @@ impl LmsState {
 
         // STEP 4 — regenerate dx[4..7] from sign(dl_pre[4..7]); zero
         // maps to the positive branch (spec §4.5).
-        let dx_mags = tables::lms_dx_magnitudes();
-        for k in 0..4 {
-            let mag = dx_mags[k];
-            self.dx[4 + k] = if dl_pre[k] < 0 { -mag } else { mag };
+        let mags = self.dx_mags;
+        for ((d, mag), dlp) in self.dx[4..].iter_mut().zip(mags).zip(dl_pre) {
+            *d = if dlp < 0 { -mag } else { mag };
         }
 
         // STEP 5 — save residual feedback, form output, regenerate
@@ -118,13 +113,36 @@ impl LmsState {
             .wrapping_sub(dl_pre[1])
             .wrapping_sub(dl_pre[2])
             .wrapping_sub(dl_pre[3]);
+        s_a
+    }
+
+    /// Same as [`Self::step`] but also returns the intermediate values
+    /// needed to populate `LMS_PRE`, `STAGE_A_PREDICT`, and `LMS_POST`
+    /// trace events per `spec/06-trace-contract.md` §5.4.
+    ///
+    /// `LmsTrace.dl_pre` / `dx_pre` / `qm_pre` are the snapshots taken
+    /// **before** the step modifies the state; `dl_post` / `dx_post` /
+    /// `qm_post` are the post-update state copied straight off `self`.
+    /// `error_pre` is the value of `self.error` at function entry (=
+    /// the previous step's residual, which gates the STEP 1 sign-LMS
+    /// update). `predicted_a` is recovered as
+    /// `sample_after_a - e` — exact under wrapping arithmetic since
+    /// [`Self::step`] forms `s_A = e + p_A` the same way.
+    #[allow(dead_code)] // only called by the cfg-gated trace pipeline.
+    pub fn step_traced(&mut self, e: i32) -> LmsTrace {
+        let dl_pre = self.dl;
+        let dx_pre = self.dx;
+        let qm_pre = self.qm;
+        let error_pre = self.error;
+
+        let s_a = self.step(e);
 
         LmsTrace {
-            dl_pre: dl_pre_full,
-            dx_pre: dx_pre_full,
-            qm_pre: qm_pre_full,
+            dl_pre,
+            dx_pre,
+            qm_pre,
             error_pre,
-            predicted_a: p_a,
+            predicted_a: s_a.wrapping_sub(e),
             sample_after_a: s_a,
             dl_post: self.dl,
             dx_post: self.dx,

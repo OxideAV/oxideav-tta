@@ -6,7 +6,37 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Round-285 (depth mode: profile-opt): profile-guided optimization of
+  the ranked-#1 decode hotspot, the Stage-A LMS step (`spec/02` §4.2)
+  — −18.2% total decode wall time on the five-scenario corpus
+  (interleaved A/B medians, 604.4 ms → 494.4 ms), with decoded PCM
+  AND encoded streams proven bit-identical via FNV-1a-64 hashes
+  before/after (the encoder shares the Stage-A step). Three changes,
+  all wrapping-exact: (1) `LmsState::step` is now the lean
+  authoritative implementation and `step_traced` the snapshotting
+  wrapper (trace builds only pay the snapshot cost); (2) the
+  `spec/02` §4.5 dx-regeneration magnitudes are cached on the state
+  at frame init (new private `LmsState::dx_mags`) instead of paying
+  the lazy-table synchronisation check every sample × channel — the
+  CSV-sourced table policy is preserved; (3) STEP 1's sign-gated qm
+  update is branch-free (`qm[i] += sign(error) · dx[i]`,
+  `sign ∈ {−1, 0, +1}`), removing a steady per-sample branch
+  misprediction on noise-like residuals; the encoder's symmetric
+  `lms_step_encode` gets the same rewrite. Post-change re-profile:
+  the LMS step fell from rank #1 (~36% of in-decode samples) to
+  rank #5 (−3.6×); the new #1 is `BitReader::read_unary`.
+
 ### Added
+
+- Round-285: `examples/profile_decode.rs` — sampling-profiler target
+  + bit-identity oracle for optimization rounds. Synthesises the same
+  deterministic xorshift corpus as the Criterion benches (mono16 /
+  stereo16 / stereo24 / 6ch16 / format=2), decodes each stream N
+  times, and prints FNV-1a-64 hashes of both the encoded bytes and
+  the decoded interleaved PCM plus wall-clock timings; the hashes
+  must be identical across any optimization commit.
 
 - Round-276: `typed_header` cargo-fuzz target — a differential check
   between the two independent `spec/01` §3 validators: the byte-level
