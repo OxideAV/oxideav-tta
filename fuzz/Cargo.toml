@@ -56,6 +56,19 @@ cargo-fuzz = true
 #   `SampleIndexOutOfRange` (panic-free typed rejection); (vi)
 #   `decode_time_range(Duration::ZERO, total_duration)` equals
 #   `decode_all`.
+# - **`password_streaming`** (round 292): panic-free + differential
+#   walk of the format=2 (password-protected) streaming + random-access
+#   decode surface reached through `Decoder::new_with_password`. The
+#   round-190 `streaming_decode` target only reaches the streaming
+#   battery through `Decoder::new` (the format=1 zero-init constructor);
+#   this target threads a fuzz-derived password through
+#   `Decoder::new_with_password` and asserts the `spec/07` §3.5–§3.6
+#   per-frame qm re-prime is observed identically across the eager
+#   `decode_with_password` path and the lazy `frame_iter` /
+#   `decode_frame_at` / `seek_to_sample` / `frame_iter_from` surface:
+#   the eager output must equal the lazy concatenation bit-exactly,
+#   random-access frames must match the eager slice, and the seek-point
+#   arithmetic must stay in range under format=2 geometry.
 # - **`typed_header`** (round 276): differential check between the two
 #   independent `spec/01` §3 validators — the byte-level parser behind
 #   `Decoder::new` and the round-240..262 typed-accessor lift
@@ -120,5 +133,11 @@ doc = false
 [[bin]]
 name = "typed_header"
 path = "fuzz_targets/typed_header.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "password_streaming"
+path = "fuzz_targets/password_streaming.rs"
 test = false
 doc = false

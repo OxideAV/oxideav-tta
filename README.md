@@ -309,7 +309,7 @@ clean-room workspace.
 
 ## Fuzzing
 
-Six [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) harnesses
+Seven [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) harnesses
 live under `fuzz/fuzz_targets/`:
 
 - **`decode`** (round 124) — feeds arbitrary bytes to both
@@ -424,6 +424,37 @@ live under `fuzz/fuzz_targets/`:
   0x7FFFFF Hz)` format=2 upper envelope, and an all-fields-invalid
   header. 34.5M execs in 90 s clean (the surface is pure header
   arithmetic — no entropy decode — so throughput is ~380K exec/s).
+- **`password_streaming`** (round 292) — drives the **format=2
+  (password-protected) streaming + random-access decode surface**
+  reached through [`Decoder::new_with_password`](src/decoder.rs). The
+  round-190 `streaming_decode` target only reaches the streaming
+  battery through `Decoder::new` (the format=1 zero-init `qm`
+  constructor); this target threads a fuzz-derived password (length +
+  bytes from the input's own prefix) through `new_with_password` and
+  pins that the `spec/07` §3.5–§3.6 per-frame `qm[0..7]` re-prime is
+  observed identically on both the eager and the lazy / random-access
+  password paths. On every fuzz-constructed input: whenever the eager
+  [`decode_with_password`](src/lib.rs) succeeds, the password-aware
+  `frame_iter` concatenation must equal it bit-exactly (and both must
+  agree on rejection — a one-sided success is a panic); a fuzz-chosen
+  `decode_frame_at(target_frame_index)` must match the corresponding
+  eager slice; `seek_to_sample(target_sample_index)` must return an
+  in-range `(frame_index, sample_offset_in_frame)` pair under the
+  format=2 seek-table geometry; and `frame_iter_from(start_index)`
+  must equal the eager suffix from the matching sample boundary. The
+  format=1-with-password `clear_priming` tolerance (audit/07 §6.2-2)
+  and the `PasswordRequired`-gate-lifted constructor are also driven.
+  The fuzz input's first 19 bytes seed the password and the
+  random-access targets so attacker-chosen passwords / frame / sample
+  indices are driven against attacker-chosen byte streams. Seed
+  corpus under `fuzz/corpus/password_streaming/` is seven streams
+  (format=2 mono16 / stereo16 multi-frame plus format=1 streams
+  exercising the `clear_priming` path) lifted from the
+  `streaming_decode` fixture pool with the 19-byte seed prefix
+  prepended. 1.77M execs in 121 s clean (cov 561, ft 1555,
+  ~14.7K exec/s — per-iteration cost is heavy because every input
+  forces both an eager and a lazy full-stream password decode for the
+  agreement check).
 
 The harness body is clean-room (no reference-implementation
 oracle). Run locally with `cargo +nightly fuzz run <target>`; the

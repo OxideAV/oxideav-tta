@@ -6,6 +6,27 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Round-292 (depth mode: fuzz): new `password_streaming` libFuzzer
+  harness (`fuzz/fuzz_targets/password_streaming.rs`) over the
+  format=2 (password-protected) streaming + random-access decode
+  surface reached through `Decoder::new_with_password` — the only
+  password streaming path not yet under a fuzzer (the round-190
+  `streaming_decode` target reaches the streaming battery only via
+  the format=1 `Decoder::new` constructor). The target threads a
+  fuzz-derived password through `new_with_password` and asserts the
+  `spec/07` §3.5–§3.6 per-frame `qm[0..7]` re-prime is observed
+  identically across the eager `decode_with_password` path and the
+  lazy / random-access password surface: eager output equals the
+  `frame_iter` concatenation bit-exactly (both must also agree on
+  rejection), `decode_frame_at` matches the eager slice,
+  `seek_to_sample` returns an in-range seek point under format=2
+  geometry, and `frame_iter_from` matches the eager suffix. Seven
+  seed inputs under `fuzz/corpus/password_streaming/`. 1.77M execs in
+  121 s, zero crashes / panics / OOM (cov 561, ft 1555). No decode
+  bug surfaced; no production code changed.
+
 ### Changed
 
 - Round-285 (depth mode: profile-opt): profile-guided optimization of
