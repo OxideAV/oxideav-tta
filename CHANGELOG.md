@@ -8,6 +8,31 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-307 (depth mode: fuzz): new `trailer_typed` libFuzzer harness
+  (`fuzz/fuzz_targets/trailer_typed.rs`) — the `spec/01` §7 analogue of
+  the §3 `typed_header` target. The round-188 `scan_trailers` target
+  drives the byte-level trailer scanner for panic-freedom but discards
+  its `TrailerInfo`; the typed-accessor lift layered on that result
+  (`TrailerInfo::id3v1_typed` / `apev2_typed` / `combined_byte_range`
+  plus the `Id3v1Range` / `ApeV2Range` projection accessors) had no
+  fuzz coverage. This target asserts the lift-totality contract the
+  accessor docs promise: a `TrailerInfo` produced by the scanner
+  (`scan_trailers` and the direct `detect_trailers` path with a
+  fuzz-derived end-of-stream offset) ALWAYS lifts cleanly at its own
+  `file_len` and carries the §7 structural invariants — ID3v1 = 128
+  bytes anchored at file end, APEv2 >= the 32-byte footer and within
+  the file, "APE immediately before ID3v1" adjacency when both are
+  present, and `combined_byte_range` = the min-start / max-end hull. It
+  separately drives the `from_raw` rejection side through
+  hand-constructed `TrailerInfo` literals with fuzz-chosen raw
+  `(start, len)` tuples — the only path to `Error::InvalidId3v1Range` /
+  `Error::InvalidApeV2Range` per the accessor docs — pinning the typed
+  lifts to their exact §7 predicate windows (`len == 128 &&
+  start + len == file_len` for ID3v1; `len >= 32 && start + len <=
+  file_len`, overflow-safe, for APEv2). Panic-free / typed-error
+  contract, no reference-implementation oracle; no new crate bug. 400K
+  randomized local execs (incl. spliced `TAG` / `APETAGEX` magics)
+  clean.
 - Round-299 (depth mode: fuzz): new `demuxer` libFuzzer harness
   (`fuzz/fuzz_targets/demuxer.rs`) over the framework raw-`.tta`
   demuxer reached through the `registry` feature — the only decode-

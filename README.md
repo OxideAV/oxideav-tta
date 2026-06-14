@@ -11,7 +11,9 @@ sugar, r219 half-open sample/time range quartet, r261 typed
 `TrailerInfo` sub-field accessors, r262 aggregate `TypedStreamHeader`
 validated view, r276 `typed_header` differential fuzz target, r285
 profile-guided Stage-A LMS optimization, −18% decode wall time, r299
-`demuxer` fuzz target → seek-table byte-window bounds fix) —
+`demuxer` fuzz target → seek-table byte-window bounds fix, r307
+`trailer_typed` differential fuzz target over the §7 trailer
+typed-accessor lift) —
 clean-room encoder + decoder +
 framework integration + trace tape + format=2 + ID3v1/APEv2 trailer
 detection + multi-frame format=2 trace coverage + format=2
@@ -483,6 +485,34 @@ live under `fuzz/fuzz_targets/`:
   by construction. Two regression tests in `src/seek_tests.rs` pin the
   oversize-first-entry and last-frame-one-byte-overrun rejections;
   11M mutated execs clean post-fix.
+- **`trailer_typed`** (round 307) — the `spec/01` §7 analogue of the
+  §3 `typed_header` target: a differential between the byte-level
+  trailer scanner (`scan_trailers` / `detect_trailers`) and the
+  **typed-accessor lift** layered on its `TrailerInfo` result
+  (`id3v1_typed` / `apev2_typed` / `combined_byte_range` plus the
+  `Id3v1Range` / `ApeV2Range` projection accessors). The round-188
+  `scan_trailers` target drives the scanner for panic-freedom but
+  *discards* its `TrailerInfo`; no fuzzer had exercised the typed lift
+  on top. This target asserts the **lift-totality** contract the
+  accessor docs promise: a `TrailerInfo` produced by the scanner
+  ALWAYS lifts cleanly at its own `file_len` and carries the §7
+  structural invariants — ID3v1 is 128 bytes anchored at file end,
+  APEv2 is at least the 32-byte footer and lies within the file, the
+  "APE immediately before ID3v1" adjacency holds when both are
+  present, and `combined_byte_range` equals the min-start / max-end
+  hull. It feeds `TrailerInfo` from both the full framing path
+  (`scan_trailers`) and the scanner driven directly with a
+  fuzz-derived end-of-stream offset (`detect_trailers`). Separately it
+  drives the `from_raw` *rejection* side through hand-constructed
+  `TrailerInfo` literals with fuzz-chosen raw `(start, len)` tuples —
+  the only path to `Error::InvalidId3v1Range` /
+  `Error::InvalidApeV2Range` per the accessor docs — pinning the typed
+  lifts to their exact §7 predicate windows (`len == 128 &&
+  start + len == file_len` for ID3v1; `len >= 32 && start + len <=
+  file_len` for APEv2, overflow-safe). Panic-free / typed-error
+  contract, no reference-implementation oracle. No new crate bug:
+  400K randomized local execs (incl. spliced `TAG` / `APETAGEX`
+  magics) clean.
 
 The harness body is clean-room (no reference-implementation
 oracle). Run locally with `cargo +nightly fuzz run <target>`; the
