@@ -6,6 +6,32 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/OxideAV/oxideav-tta/compare/v0.0.2...v0.0.3) - 2026-06-14
+
+### Other
+
+- r307 trailer_typed differential target over the §7 trailer typed-accessor lift
+- tta r299: demuxer fuzz target + seek-table byte-window bounds fix
+- r292 fuzz — password_streaming differential libFuzzer target
+- Round-285 (profile-opt): Stage-A LMS hotspot, -18% decode wall time, bit-identical
+- typed_header differential fuzz target on the spec/01 §3 header surface
+- aggregate TypedStreamHeader validated view per spec/01 §3
+- typed TrailerInfo sub-field accessors
+- typed SeekPoint sub-field accessors
+- typed FrameGeometry projection on StreamHeader
+- drop release-plz.toml — use release-plz defaults across the workspace
+- typed FrameDescriptor sub-field accessors
+- typed TotalSamples accessor for StreamHeader::total_samples
+- scrub pre-existing decorative external-impl attribution
+- typed StreamHeader sub-field accessors
+- range + duration-keyed player-API Criterion bench
+- sample_range cargo-fuzz target — r209/r215/r219 player-API surface
+- half-open sample/time range quartet on Decoder
+- duration-keyed player-API sugar on Decoder
+- decode_from_sample / frame_iter_from_sample player-API sugar
+- public Decoder::new_with_password — format=2 streaming reach
+- streaming bench parameter-cube extension
+
 ### Added
 
 - Round-307 (depth mode: fuzz): new `trailer_typed` libFuzzer harness
