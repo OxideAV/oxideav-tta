@@ -264,3 +264,60 @@ fn seek_pts_matches_decoder_output_after_seek() {
     assert_eq!(streams[0].time_base.0.den, fix.sample_rate as i64);
     assert_eq!(streams[0].time_base.0.num, 1);
 }
+
+/// Regression (round 299): a malformed seek table whose first entry
+/// declares a `disk_size` larger than the file used to drive the
+/// per-frame mini-file assembly in `build_single_frame_file` to slice
+/// `all[file_offset..file_offset + disk_size]` out of bounds — a panic
+/// reachable through the public `open_demuxer` → `next_packet` path with
+/// any caller-supplied bytes. `open_demuxer` now validates every frame's
+/// `[file_offset, file_offset + disk_size)` window against the file
+/// length at open time, so the malformed stream is rejected with a typed
+/// `Error::Invalid` rather than panicking at packet-emit time.
+#[test]
+fn malformed_seek_table_oversize_disk_size_is_rejected_not_panic() {
+    // ~100k mono 16-bit samples at 44.1 kHz spans three frames
+    // (regular_frame_samples = 46_073), so the seek table has three
+    // 4-byte entries starting at byte 22 (after the 22-byte header).
+    let samples = vec![0i32; 100_000];
+    let mut bytes = encode(&samples, 1, 16, 44_100).expect("encode should succeed");
+    // Overwrite the first seek-table entry's disk_size with a value that
+    // overruns the file. The demuxer does not enforce the seek-table
+    // CRC, so leaving it stale still reaches the byte-window check.
+    let st_off = 22;
+    bytes[st_off..st_off + 4].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+
+    let cursor: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+    let result = open_demuxer_for_test(cursor, &NoopResolver);
+    match result {
+        Err(CoreError::InvalidData(_)) => {}
+        Err(other) => panic!("expected Error::InvalidData, got {other:?}"),
+        Ok(_) => panic!("oversize seek-table disk_size must be rejected at open time"),
+    }
+}
+
+/// Companion to the above: a seek table whose cumulative `file_offset`
+/// for a later frame is itself in range but whose `disk_size` pushes the
+/// body end one byte past EOF is rejected. Confirms the check is a
+/// `<= file_len` end-bound test, not merely a start-offset test.
+#[test]
+fn malformed_seek_table_last_frame_one_byte_overrun_is_rejected() {
+    let samples = vec![0i32; 100_000];
+    let mut bytes = encode(&samples, 1, 16, 44_100).expect("encode should succeed");
+    // Inflate the THIRD (last) frame's disk_size by exactly the slack we
+    // create by appending nothing — set it so the cumulative body end is
+    // file_len + 1. Easiest: bump the last entry by a large amount.
+    let st_off = 22 + 8; // third entry (entries are 4 bytes each)
+    let orig = u32::from_le_bytes(bytes[st_off..st_off + 4].try_into().unwrap());
+    let inflated = orig.saturating_add(1).max(orig + 1);
+    // Make it overrun for certain.
+    let big = inflated.saturating_add(1_000);
+    bytes[st_off..st_off + 4].copy_from_slice(&big.to_le_bytes());
+
+    let cursor: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+    match open_demuxer_for_test(cursor, &NoopResolver) {
+        Err(CoreError::InvalidData(_)) => {}
+        Err(other) => panic!("expected Error::InvalidData, got {other:?}"),
+        Ok(_) => panic!("last-frame overrun must be rejected at open time"),
+    }
+}

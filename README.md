@@ -10,7 +10,8 @@ r209 sample-keyed player-API sugar, r215 duration-keyed player-API
 sugar, r219 half-open sample/time range quartet, r261 typed
 `TrailerInfo` sub-field accessors, r262 aggregate `TypedStreamHeader`
 validated view, r276 `typed_header` differential fuzz target, r285
-profile-guided Stage-A LMS optimization, −18% decode wall time) —
+profile-guided Stage-A LMS optimization, −18% decode wall time, r299
+`demuxer` fuzz target → seek-table byte-window bounds fix) —
 clean-room encoder + decoder +
 framework integration + trace tape + format=2 + ID3v1/APEv2 trailer
 detection + multi-frame format=2 trace coverage + format=2
@@ -309,7 +310,7 @@ clean-room workspace.
 
 ## Fuzzing
 
-Seven [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) harnesses
+Nine [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) harnesses
 live under `fuzz/fuzz_targets/`:
 
 - **`decode`** (round 124) — feeds arbitrary bytes to both
@@ -455,6 +456,33 @@ live under `fuzz/fuzz_targets/`:
   ~14.7K exec/s — per-iteration cost is heavy because every input
   forces both an eager and a lazy full-stream password decode for the
   agreement check).
+- **`demuxer`** (round 299) — drives the framework **raw-`.tta`
+  demuxer** reached through the `registry` feature. None of the other
+  targets touch this path: `decode` / `streaming_decode` exercise the
+  single-shot decode entry points, whose seek table is built
+  internally, whereas the demuxer consumes the on-wire seek table
+  *verbatim* and slices the file buffer over each frame's
+  `[file_offset, file_offset + disk_size)` byte window to assemble one
+  self-contained mini-TTA1 packet per frame (`spec/01` §4.2 / §5.1).
+  The target builds a `RuntimeContext`, `register`s the codec +
+  container, opens the demuxer over the fuzz bytes via the public
+  `ContainerRegistry::open_demuxer` path, drains `next_packet` to EOF
+  (bounded), then re-drains after a battery of fuzz-derived `seek_to`
+  probes (stream 0 / out-of-range stream index, `pts = 0`, negative
+  pts, past-end pts, and a fuzz-derived pts). Panic-free / typed-error
+  contract, no oracle. Seed corpus under `fuzz/corpus/demuxer/` is the
+  small mono16 / mono24 seeds plus three multi-frame streams
+  (mono16-3s, stereo16-3s, stereo24-2.5s) lifted from the
+  `streaming_decode` fixture pool. This target found one bug (round
+  299): a malformed seek table whose `disk_size` (or cumulative
+  `file_offset`) overran the file made `build_single_frame_file` slice
+  `all[file_offset..file_offset + disk_size]` out of bounds and panic
+  at packet-emit time. `open_demuxer` now validates every frame's byte
+  window against the file length at open time and rejects an overrun
+  with a typed `Error::InvalidData` — so `next_packet` is panic-free
+  by construction. Two regression tests in `src/seek_tests.rs` pin the
+  oversize-first-entry and last-frame-one-byte-overrun rejections;
+  11M mutated execs clean post-fix.
 
 The harness body is clean-room (no reference-implementation
 oracle). Run locally with `cargo +nightly fuzz run <target>`; the

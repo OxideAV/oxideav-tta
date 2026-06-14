@@ -442,6 +442,29 @@ fn open_demuxer(
         parse_seek_table(&after_id3[hdr_len..], &header, frame_data_start)
             .map_err(|e| CoreError::invalid(format!("oxideav-tta demuxer: seek-table: {e}")))?;
 
+    // `parse_seek_table` takes each frame's `disk_size` verbatim from the
+    // (attacker-controllable) seek-table bytes and never validates that
+    // the resulting `[file_offset, file_offset + disk_size)` window lies
+    // inside the file. `build_single_frame_file` later slices `all` over
+    // exactly that window, so a malformed seek table whose entries
+    // overrun the file would index out of bounds at packet-emit time.
+    // Validate every frame's byte window against the file length here, at
+    // open time, so `next_packet` stays panic-free by construction
+    // (`spec/01` §4.2 / §5.1: a frame block is `body + 4-byte CRC` and
+    // must lie within the on-disk stream region).
+    let file_len = all.len() as u64;
+    for (idx, frame) in seek_table.frames.iter().enumerate() {
+        let body_end = frame.file_offset.checked_add(frame.disk_size as u64);
+        let in_bounds = body_end.is_some_and(|end| end <= file_len);
+        if !in_bounds {
+            return Err(CoreError::invalid(format!(
+                "oxideav-tta demuxer: seek-table frame {idx} byte window \
+                 [{}, {} + {}) overruns the {file_len}-byte file",
+                frame.file_offset, frame.file_offset, frame.disk_size
+            )));
+        }
+    }
+
     let sample_format = match header.bits_per_sample {
         16 => SampleFormat::S16,
         17..=24 => SampleFormat::S24,

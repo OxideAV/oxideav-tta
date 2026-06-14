@@ -86,12 +86,18 @@ libfuzzer-sys = "0.4"
 
 [dependencies.oxideav-tta]
 path = ".."
-# The decode entry points live behind the default `registry` feature's
-# sibling code, but the framing/decoder path itself is feature-agnostic.
-# Disable default features so the fuzz crate does not drag in
-# `oxideav-core`; the `decode` / `decode_with_password` functions are
-# always compiled.
-default-features = false
+# The decode entry points are feature-agnostic, but the `demuxer` target
+# (round 299) drives the framework demuxer reached through the `registry`
+# feature, so it is enabled here. The feature is additive — every
+# decode-path target still compiles against the same dependency.
+features = ["registry"]
+
+# `oxideav-core` is needed by the `demuxer` target to build a
+# RuntimeContext, a CodecResolver, and a ReadSeek cursor. It is pulled
+# in transitively by the `oxideav-tta` `registry` feature above; this
+# explicit entry pins the same "0.1" line the library uses.
+[dependencies.oxideav-core]
+version = "0.1"
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -139,5 +145,11 @@ doc = false
 [[bin]]
 name = "password_streaming"
 path = "fuzz_targets/password_streaming.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demuxer"
+path = "fuzz_targets/demuxer.rs"
 test = false
 doc = false

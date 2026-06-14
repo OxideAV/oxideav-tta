@@ -8,6 +8,22 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-299 (depth mode: fuzz): new `demuxer` libFuzzer harness
+  (`fuzz/fuzz_targets/demuxer.rs`) over the framework raw-`.tta`
+  demuxer reached through the `registry` feature — the only decode-
+  adjacent surface not yet under a fuzzer. The other targets exercise
+  the single-shot decode entry points (whose seek table is built
+  internally); the demuxer instead consumes the on-wire seek table
+  verbatim and slices the file buffer over each frame's
+  `[file_offset, file_offset + disk_size)` window to assemble one
+  self-contained mini-TTA1 packet per frame (`spec/01` §4.2 / §5.1).
+  The target opens the demuxer via the public
+  `ContainerRegistry::open_demuxer` path, drains `next_packet` to EOF,
+  and re-drains after a battery of fuzz-derived `seek_to` probes.
+  Panic-free / typed-error contract, no reference-implementation
+  oracle. Seed corpus under `fuzz/corpus/demuxer/` (small mono16 /
+  mono24 + three multi-frame streams). 11M mutated execs clean
+  post-fix.
 - Round-292 (depth mode: fuzz): new `password_streaming` libFuzzer
   harness (`fuzz/fuzz_targets/password_streaming.rs`) over the
   format=2 (password-protected) streaming + random-access decode
@@ -48,6 +64,20 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `lms_step_encode` gets the same rewrite. Post-change re-profile:
   the LMS step fell from rank #1 (~36% of in-decode samples) to
   rank #5 (−3.6×); the new #1 is `BitReader::read_unary`.
+
+### Fixed
+
+- Round-299 (found by the new `demuxer` fuzz target): the raw-`.tta`
+  demuxer's `open_demuxer` accepted a malformed seek table whose
+  per-frame `disk_size` (or cumulative `file_offset`) overran the file,
+  then panicked on the out-of-bounds slice
+  `all[file_offset..file_offset + disk_size]` inside
+  `build_single_frame_file` at packet-emit time. `open_demuxer` now
+  validates every frame's `[file_offset, file_offset + disk_size)` byte
+  window against the file length at open time (`spec/01` §4.2 / §5.1: a
+  frame block is `body + 4-byte CRC` and must lie within the on-disk
+  stream region) and rejects an overrun with a typed
+  `Error::InvalidData`, so `next_packet` is panic-free by construction.
 
 ### Added
 
