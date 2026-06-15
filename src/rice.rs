@@ -258,4 +258,113 @@ mod tests {
         let _ = decode_one(&mut reader, &mut state).expect("decode");
         assert_eq!(state.k0, MAX_K - 1);
     }
+
+    /// Append one Rice codeword to a growing LSB-first bit buffer per
+    /// spec §6: `u` unary `1` bits, then a `0` terminator, then a
+    /// `k`-bit binary tail LSB-first (`k = k0` for `u == 0` low mode,
+    /// else `k1`). This is the encode-side bit layout the decoder
+    /// inverts; it lets each test below name `(u, k, tail)` directly
+    /// and build the exact body the hand-verification in §7 consumes.
+    fn push_codeword(bits: &mut Vec<u8>, u: u32, k: u32, tail: u32) {
+        for _ in 0..u {
+            bits.push(1);
+        }
+        bits.push(0); // unary terminator
+        for i in 0..k {
+            bits.push(((tail >> i) & 1) as u8);
+        }
+    }
+
+    /// Pack an LSB-first bit list into bytes (bit 0 → LSB of byte 0).
+    fn pack_lsb_first(bits: &[u8]) -> Vec<u8> {
+        let mut out = vec![0u8; bits.len().div_ceil(8)];
+        for (i, &b) in bits.iter().enumerate() {
+            if b != 0 {
+                out[i / 8] |= 1 << (i % 8);
+            }
+        }
+        out
+    }
+
+    /// Reproduce spec §7.2 — the first non-trivial sample, exercising
+    /// the depth-1 escape bias taken from `k0_pre = 9` (NOT `k1`,
+    /// anti-pattern §9.2) and the STEP-A-before-STEP-B ordering
+    /// (anti-pattern §9.3). Pre-state `(k0=9, k1=10, sum0=15360,
+    /// sum1=16384)`; `u=2`, `k1=10`, binary_tail=515; the spec tape
+    /// records post-state `(10, 10, 16451, 16899)` and residual 1026.
+    #[test]
+    fn step_one_matches_spec_7_2() {
+        // u=2 high-mode codeword with a k1=10-bit tail = 515.
+        let mut bits = Vec::new();
+        push_codeword(&mut bits, 2, 10, 515);
+        let body = pack_lsb_first(&bits);
+        let mut reader = BitReader::new(&body);
+        let mut state = RiceState {
+            k0: 9,
+            k1: 10,
+            sum0: 15_360,
+            sum1: 16_384,
+        };
+        let e = decode_one(&mut reader, &mut state).unwrap();
+        assert_eq!(e, 1026, "residual mismatch vs spec §7.2");
+        assert_eq!(state.k0, 10);
+        assert_eq!(state.k1, 10);
+        assert_eq!(state.sum0, 16_451);
+        assert_eq!(state.sum1, 16_899);
+    }
+
+    /// Reproduce spec §7.4 — the first step with `k0 != k1`, the
+    /// canonical witness that the escape bias uses `k0` (= 1024) while
+    /// the high-mode tail width uses `k1` (= 9). Pre-state `(k0=10,
+    /// k1=9, sum0=26219, sum1=16229)`; `u=2`, `k1=9`, binary_tail=129;
+    /// the tape records post-state `(10, 9, 26246, 15856)` and residual
+    /// 833. A `1 << k1` bias (anti-pattern §9.2) would yield the wrong
+    /// `value`, residual, and both sums here.
+    #[test]
+    fn step_seventeen_matches_spec_7_4() {
+        let mut bits = Vec::new();
+        push_codeword(&mut bits, 2, 9, 129);
+        let body = pack_lsb_first(&bits);
+        let mut reader = BitReader::new(&body);
+        let mut state = RiceState {
+            k0: 10,
+            k1: 9,
+            sum0: 26_219,
+            sum1: 16_229,
+        };
+        let e = decode_one(&mut reader, &mut state).unwrap();
+        assert_eq!(e, 833, "residual mismatch vs spec §7.4");
+        assert_eq!(state.k0, 10);
+        assert_eq!(state.k1, 9);
+        assert_eq!(state.sum0, 26_246);
+        assert_eq!(state.sum1, 15_856);
+    }
+
+    /// Reproduce spec §7.5 — the first negative residual, exercising
+    /// the even-magnitude → negative sign branch of the zigzag decode
+    /// (§3.5) and confirming the low-mode (`u=0`) path leaves `sum1`
+    /// untouched while `sum0` decays and `k0` decrements. Pre-state
+    /// `(k0=10, k1=9, sum0=17094, sum1=12279)`; `u=0`, `k0=10`,
+    /// binary_tail=38; the tape records post-state `(9, 9, 16064,
+    /// 12279)` and residual -19.
+    #[test]
+    fn step_thirtythree_matches_spec_7_5() {
+        let mut bits = Vec::new();
+        push_codeword(&mut bits, 0, 10, 38);
+        let body = pack_lsb_first(&bits);
+        let mut reader = BitReader::new(&body);
+        let mut state = RiceState {
+            k0: 10,
+            k1: 9,
+            sum0: 17_094,
+            sum1: 12_279,
+        };
+        let e = decode_one(&mut reader, &mut state).unwrap();
+        assert_eq!(e, -19, "residual mismatch vs spec §7.5");
+        assert_eq!(state.k0, 9);
+        assert_eq!(state.k1, 9);
+        assert_eq!(state.sum0, 16_064);
+        // Low mode never touches sum1 (§7.6 quiet-regime note).
+        assert_eq!(state.sum1, 12_279);
+    }
 }

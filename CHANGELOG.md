@@ -6,6 +6,22 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Round-313: three Rice-decoder hand-verification unit tests in
+  `src/rice.rs` reproducing the spec/05 §7 reference-tape walk-through
+  beyond the lone §7.1 step-0 case already covered. `step_one_matches_spec_7_2`
+  drives the first high-mode step with the depth-1 escape bias taken
+  from `k0_pre = 9` (anti-pattern §9.2) under STEP-A-before-STEP-B
+  ordering (§9.3); `step_seventeen_matches_spec_7_4` is the canonical
+  `k0 != k1` witness that the bias uses `k0` while the tail width uses
+  `k1`; `step_thirtythree_matches_spec_7_5` exercises the first negative
+  residual (even-magnitude zigzag sign branch, §3.5) and confirms the
+  low-mode path leaves `sum1` untouched. Each builds the exact LSB-first
+  body the tape consumes via a `push_codeword` / `pack_lsb_first` test
+  helper and asserts the residual plus all four post-state trackers
+  bit-for-bit against the spec. No impl change.
+
 ## [0.0.3](https://github.com/OxideAV/oxideav-tta/compare/v0.0.2...v0.0.3) - 2026-06-14
 
 ### Other

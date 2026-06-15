@@ -87,6 +87,11 @@ from CSV in `tables/`.
 
 * Per-spec hand-verifications transcribed from the spec's worked-step
   examples (Stage-A samples, Stage-B positive/negative state, Rice).
+  The Rice path now drives the reference-tape steps that exercise the
+  high-mode escape bias when `k0 != k1`, the STEP-A-before-STEP-B
+  tracker ordering, and the first negative residual's zigzag sign
+  branch — each asserted bit-for-bit against the spec, residual plus
+  all four post-state trackers.
 * Full encode→decode roundtrips on mono / stereo / six-channel
   fixtures, 16-bit and 24-bit, with sine / silence / pseudo-noise /
   DC+impulse content, including multi-frame streams that exercise the
