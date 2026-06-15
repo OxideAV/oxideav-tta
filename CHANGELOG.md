@@ -8,6 +8,24 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-319: `benches/demuxer.rs` Criterion harness for the framework
+  raw-`.tta` demuxer (`src/registry.rs`). The demuxer parses the TTA1
+  header + seek table at open, emits one self-contained mini-TTA1
+  packet per audio frame, and answers `seek_to(pts)` in O(1) off the
+  cumulative seek-table offsets (`spec/01` §4.1); it was fuzzed in
+  r299 but had no benchmark. Three scenarios — `demuxer_open` (header
+  + seek-table parse + open-time per-frame byte-window bounds check),
+  `demuxer_drain` (open + `next_packet` to EOF, exercising the
+  per-frame `build_single_frame_file` mini-file re-prefix), and
+  `demuxer_seek_to` (the O(1) random-access lookup) — each run across
+  the same mono16 / stereo16 / stereo24 / 6ch16 / format=2 parameter
+  cube as `benches/decode.rs`. Streams are synthesised in-bench from a
+  deterministic xorshift seed and encoded via the production `encode`
+  / `encode_with_password`; no checked-in fixtures, no `docs/` reads.
+  The demuxer is driven through the public
+  `RuntimeContext` + `ContainerRegistry::open_demuxer` path. Adds a
+  dev-only `oxideav-core = "0.1"` dependency (`required-features =
+  ["registry"]`). No impl change.
 - Round-313: three Rice-decoder hand-verification unit tests in
   `src/rice.rs` reproducing the spec/05 §7 reference-tape walk-through
   beyond the lone §7.1 step-0 case already covered. `step_one_matches_spec_7_2`

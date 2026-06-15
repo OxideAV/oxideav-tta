@@ -35,6 +35,15 @@ oxideav-core = { version = "0.1", optional = true }
 # magicyuv, h264, pixfmt) already track.
 criterion = "0.5"
 
+# Round 319 (demuxer bench): the `demuxer` Criterion harness drives the
+# framework `Demuxer` reached through the default-on `registry` feature
+# (`RuntimeContext` + `ContainerRegistry::open_demuxer` + a
+# `CodecResolver`), so it needs the framework crate at dev time. This is
+# the same "0.1" line the library's optional `registry` dependency uses
+# — never patch-pin a `0.1.X`.
+[dev-dependencies.oxideav-core]
+version = "0.1"
+
 # Round 127 benches. Each binary lives in `benches/<name>.rs` and is
 # self-contained (no committed fixture files — every PCM input is
 # synthesised in-bench from a deterministic xorshift seed, then fed
@@ -74,3 +83,16 @@ harness = false
 [[bench]]
 name = "range"
 harness = false
+
+# Round 319 (demuxer bench): the framework raw-`.tta` demuxer
+# (`src/registry.rs` — parses the TTA1 header + seek table at open,
+# emits one self-contained mini-TTA1 packet per audio frame, answers
+# O(1) `seek_to(pts)` off the cumulative seek-table offsets) was
+# fuzzed in r299 but never benchmarked. This harness measures the
+# three demuxer hot paths (open, full `next_packet` drain, `seek_to`
+# random access) so future optimisation rounds can A/B against a
+# baseline. Requires the `registry` feature; runs under it by default.
+[[bench]]
+name = "demuxer"
+harness = false
+required-features = ["registry"]
