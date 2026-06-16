@@ -313,6 +313,80 @@ mod tests {
         assert_eq!(state.sum1, 16_899);
     }
 
+    /// Reproduce spec §7.3 (step 2) — the second non-trivial sample,
+    /// the first step of the mid-frame regime. Pre-state `(k0=10,
+    /// k1=10, sum0=16451, sum1=16899)`; `u=2`, `k1=10`, binary_tail=27.
+    /// Per §7.3: `value_after_binary = (1 << 10) + 27 = 1051`; STEP A
+    /// leaves `sum1 = 16894` with `k1` unchanged (16384 < 16894 <
+    /// 32768); the `1 << k0 = 1024` escape bias lifts the value to
+    /// `value_final = 2075`; STEP B leaves `sum0 = 17498` with `k0`
+    /// unchanged (16384 < 17498 < 32768); dezigzag of the odd 2075
+    /// yields residual 1038. This pins the regime where BOTH trackers
+    /// sit at the 2x-window's upper interior, so neither the increment
+    /// nor the decrement branch fires — the steady-state path that the
+    /// boundary-focused §7.1/§7.2/§7.4/§7.5 cases never exercise.
+    #[test]
+    fn step_two_matches_spec_7_3() {
+        let mut bits = Vec::new();
+        push_codeword(&mut bits, 2, 10, 27);
+        let body = pack_lsb_first(&bits);
+        let mut reader = BitReader::new(&body);
+        let mut state = RiceState {
+            k0: 10,
+            k1: 10,
+            sum0: 16_451,
+            sum1: 16_899,
+        };
+        let e = decode_one(&mut reader, &mut state).unwrap();
+        assert_eq!(e, 1038, "residual mismatch vs spec §7.3 step 2");
+        assert_eq!(state.k0, 10);
+        assert_eq!(state.k1, 10);
+        assert_eq!(state.sum0, 17_498);
+        assert_eq!(state.sum1, 16_894);
+    }
+
+    /// Reproduce spec §7.3 (step 16) — the FIRST `k1` demotion of the
+    /// canonical fixture, the headline event of the §7.3 mid-frame
+    /// regime. Pre-state `(k0=10, k1=10, sum0=26105, sum1=16541)`;
+    /// `u=1`, `k1=10`, binary_tail=721. Per §7.3: `value_after_binary
+    /// = (0 << 10) + 721 = 721`; STEP A computes `sum1 = 16541 + 721 -
+    /// (16541 >> 4) = 16229`, and because `16229 < (1 << 14) = 16384`
+    /// the decrement branch fires for the first time, dropping `k1`
+    /// from 10 to 9; the `1 << k0 = 1024` bias lifts the value to
+    /// `value_final = 1745`; STEP B computes `sum0 = 26219` with `k0`
+    /// unchanged (26219 < 32768); dezigzag of the odd 1745 yields
+    /// residual 873. The resulting post-state `(10, 9, 26219, 16229)`
+    /// is exactly the pre-state that `step_seventeen_matches_spec_7_4`
+    /// assumes — so this test closes the previously-unasserted gap in
+    /// the §7.1→§7.7 state chain at the point `k1` first diverges from
+    /// `k0`.
+    #[test]
+    fn step_sixteen_matches_spec_7_3_first_k1_demotion() {
+        let mut bits = Vec::new();
+        push_codeword(&mut bits, 1, 10, 721);
+        let body = pack_lsb_first(&bits);
+        let mut reader = BitReader::new(&body);
+        let mut state = RiceState {
+            k0: 10,
+            k1: 10,
+            sum0: 26_105,
+            sum1: 16_541,
+        };
+        let e = decode_one(&mut reader, &mut state).unwrap();
+        assert_eq!(e, 873, "residual mismatch vs spec §7.3 step 16");
+        assert_eq!(state.k0, 10);
+        assert_eq!(state.k1, 9, "k1 must demote 10->9 for the first time");
+        assert_eq!(state.sum0, 26_219);
+        assert_eq!(state.sum1, 16_229);
+        // The post-state must equal step 17's documented pre-state, so
+        // the spec §7.1..§7.7 walk forms an unbroken chain.
+        assert_eq!(
+            (state.k0, state.k1, state.sum0, state.sum1),
+            (10, 9, 26_219, 16_229),
+            "step-16 post-state must match step-17 (§7.4) pre-state"
+        );
+    }
+
     /// Reproduce spec §7.4 — the first step with `k0 != k1`, the
     /// canonical witness that the escape bias uses `k0` (= 1024) while
     /// the high-mode tail width uses `k1` (= 9). Pre-state `(k0=10,

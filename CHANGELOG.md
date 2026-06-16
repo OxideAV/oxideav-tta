@@ -8,6 +8,20 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-323: two reference-tape hand-verification tests for spec/05
+  §7.3 (the mid-frame Rice regime), `step_two_matches_spec_7_3` and
+  `step_sixteen_matches_spec_7_3_first_k1_demotion`. The §7 worked-step
+  walk previously had unit tests only at the boundary samples 0, 1, 17,
+  and 33; the §7.3 block (steps 2..16) — the steady-state interior of
+  the 2x adaptation window and the first `k1` demotion (10→9) of the
+  canonical fixture — was unasserted. The step-16 test additionally
+  pins that its post-state `(10, 9, 26219, 16229)` equals the pre-state
+  `step_seventeen_matches_spec_7_4` assumes, closing the only break in
+  the §7.1→§7.7 tracker chain. Both decode through the public
+  `decode_one` and assert residual plus all four post-state trackers
+  bit-for-bit against the spec tape. Test-only; no `src/` hot-path or
+  public-API change.
+
 - Round-319: `benches/demuxer.rs` Criterion harness for the framework
   raw-`.tta` demuxer (`src/registry.rs`). The demuxer parses the TTA1
   header + seek table at open, emits one self-contained mini-TTA1
