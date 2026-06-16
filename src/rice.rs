@@ -65,7 +65,13 @@ fn shl_saturating(shift: u32) -> u32 {
 /// on increment mirrors the reference's observed `[0, 31]` range and
 /// keeps every binary-tail read within `read_bits`'s contract without
 /// altering the decode of any valid stream.
-const MAX_K: u32 = 31;
+///
+/// The encoder ([`crate::encoder`]) mirrors this cap on its own
+/// tracker increments so the two stay in lock-step: an uncapped
+/// encoder could advance `k` to 32+ on a pathological residual stream
+/// while the capped decoder pins it at 31, diverging the trackers and
+/// breaking the lossless roundtrip from the first post-cap step onward.
+pub(crate) const MAX_K: u32 = 31;
 
 /// Decode one Rice value from `reader` and return the signed residual.
 /// Updates `state` in place per spec §5.

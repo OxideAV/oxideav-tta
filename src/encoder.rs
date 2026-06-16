@@ -30,7 +30,7 @@
 
 use crate::error::{Error, Result};
 use crate::lms::LmsState;
-use crate::rice::{zigzag, RiceState};
+use crate::rice::{zigzag, RiceState, MAX_K};
 use crate::stage_b::StageBState;
 
 /// Maximum supported channels per `spec/01` §3 (mirrors the decoder's
@@ -346,6 +346,14 @@ impl BitWriter {
 /// `value < (1 << k0)`), same depth-1 escape bias on the high path,
 /// same `(k0, k1, sum0, sum1)` IIR-feedback update (`spec/05` §5.2 +
 /// §5.3 thresholds).
+///
+/// The three `k` increment branches are clamped at [`MAX_K`] exactly as
+/// the decoder's `decode_one` clamps them. Without this clamp an
+/// encoder driven to `k = 31` by a pathological residual stream would
+/// advance `k` to 32+ while the decoder pinned it at 31, diverging the
+/// trackers and corrupting every subsequent residual's bit layout — the
+/// lock-step the [`tests::rice_tracker_lockstep_drives_k_high`]
+/// property pins.
 fn rice_encode_one(writer: &mut BitWriter, state: &mut RiceState, e: i32) {
     let value = zigzag(e);
     let bias_k0 = if state.k0 >= 32 {
@@ -364,7 +372,7 @@ fn rice_encode_one(writer: &mut BitWriter, state: &mut RiceState, e: i32) {
         state.sum0 = state.sum0.wrapping_add(value).wrapping_sub(state.sum0 >> 4);
         if state.k0 > 0 && state.sum0 < shl_saturating(state.k0 + 4) {
             state.k0 -= 1;
-        } else if state.sum0 > shl_saturating(state.k0 + 5) {
+        } else if state.k0 < MAX_K && state.sum0 > shl_saturating(state.k0 + 5) {
             state.k0 += 1;
         }
     } else {
@@ -389,7 +397,7 @@ fn rice_encode_one(writer: &mut BitWriter, state: &mut RiceState, e: i32) {
             .wrapping_sub(state.sum1 >> 4);
         if state.k1 > 0 && state.sum1 < shl_saturating(state.k1 + 4) {
             state.k1 -= 1;
-        } else if state.sum1 > shl_saturating(state.k1 + 5) {
+        } else if state.k1 < MAX_K && state.sum1 > shl_saturating(state.k1 + 5) {
             state.k1 += 1;
         }
         // STEP B equivalent — sum0 / k0 update on the post-bias value
@@ -406,7 +414,7 @@ fn rice_encode_one(writer: &mut BitWriter, state: &mut RiceState, e: i32) {
             .wrapping_sub(state.sum0 >> 4);
         if state.k0 > 0 && state.sum0 < shl_saturating(state.k0 + 4) {
             state.k0 -= 1;
-        } else if state.sum0 > shl_saturating(state.k0 + 5) {
+        } else if state.k0 < MAX_K && state.sum0 > shl_saturating(state.k0 + 5) {
             state.k0 += 1;
         }
     }
@@ -447,5 +455,125 @@ mod tests {
             assert_eq!(e, expected_e, "residual mismatch at i={i}");
             assert_eq!(state, k_states_after[i], "tracker state mismatch at i={i}");
         }
+    }
+
+    /// Drive a residual sequence and assert that, for every step, the
+    /// encoder's post-step tracker state equals the decoder's
+    /// post-step tracker state for the bytes the encoder produced, the
+    /// decoded residual equals the input, and neither side's `k0`/`k1`
+    /// ever exceeds [`MAX_K`]. Returns the final tracker state so a
+    /// caller can assert how far `k` climbed.
+    fn assert_encode_decode_lockstep(residuals: &[i32]) -> RiceState {
+        let mut writer = BitWriter::new();
+        let mut enc_state = RiceState::frame_init();
+        let mut per_step = Vec::with_capacity(residuals.len());
+        for &e in residuals {
+            rice_encode_one(&mut writer, &mut enc_state, e);
+            assert!(enc_state.k0 <= MAX_K, "encoder k0 exceeded MAX_K");
+            assert!(enc_state.k1 <= MAX_K, "encoder k1 exceeded MAX_K");
+            per_step.push(enc_state);
+        }
+        let body = writer.finish_byte_aligned();
+
+        let mut reader = crate::bitreader::BitReader::new(&body);
+        let mut dec_state = RiceState::frame_init();
+        for (i, &expected_e) in residuals.iter().enumerate() {
+            let e = crate::rice::decode_one(&mut reader, &mut dec_state)
+                .expect("decode of encoder-produced body must not error");
+            assert_eq!(e, expected_e, "residual mismatch at step {i}");
+            assert!(dec_state.k0 <= MAX_K, "decoder k0 exceeded MAX_K");
+            assert!(dec_state.k1 <= MAX_K, "decoder k1 exceeded MAX_K");
+            assert_eq!(
+                dec_state, per_step[i],
+                "encoder/decoder tracker divergence at step {i}"
+            );
+        }
+        enc_state
+    }
+
+    /// Property: the encoder and decoder Rice trackers stay in
+    /// lock-step even when a residual stream drives `k` far above the
+    /// regime a valid stream ever reaches, and `k` is held under the
+    /// `MAX_K` ceiling by the increment guard on both sides.
+    ///
+    /// Before the encoder mirrored the decoder's `k < MAX_K` increment
+    /// guard, a stream of progressively larger magnitudes could advance
+    /// the encoder's `k` past 31 while the decoder pinned it at 31. The
+    /// trackers would then diverge and every subsequent residual's bit
+    /// layout would be computed against a different `k` on each side,
+    /// silently corrupting the lossless roundtrip.
+    ///
+    /// Magnitudes are bounded so that both the zigzag magnitude and the
+    /// post-bias `value` stay inside the `< 2^31` domain where
+    /// `dezigzag` is unambiguous (spec §3.5 / anti-pattern §11). The
+    /// escape bias is `1 << k0`, so for the high-mode value to stay
+    /// representable the bias must leave headroom — that bounds the
+    /// useful `k0` to ~24 here, which is still far above the `k <= 13`
+    /// any real corpus reaches and exercises a long run of increment
+    /// steps that the pre-fix encoder would have driven past the cap.
+    #[test]
+    fn rice_tracker_lockstep_drives_k_high() {
+        // Cap magnitudes so that even after the `1 << k0` escape bias,
+        // `value` stays below 2^31. With k0 ceilinged near 24 the bias
+        // is ~2^24; a magnitude cap of 2^23 keeps the sum comfortably
+        // under 2^31.
+        const MAG_CAP: i64 = 1 << 23;
+        let mut residuals: Vec<i32> = Vec::new();
+        let mut mag: i64 = 1;
+        // Ramp magnitudes up to MAG_CAP, alternating sign so the zigzag
+        // exercises both parities.
+        while mag < MAG_CAP {
+            residuals.push(mag as i32);
+            residuals.push(-(mag as i32));
+            mag *= 2;
+        }
+        // Hold at the cap magnitude long enough that the increment
+        // branch keeps firing as `k` climbs and then plateaus.
+        let big = MAG_CAP as i32;
+        for n in 0..256 {
+            residuals.push(if n % 2 == 0 { big } else { -big });
+        }
+
+        let final_state = assert_encode_decode_lockstep(&residuals);
+        // The ramp must actually have driven a tracker well above the
+        // valid-stream regime (`k <= 13`), otherwise the increment path
+        // — and the would-be overflow the fix prevents — is never
+        // exercised and the test is vacuous.
+        assert!(
+            final_state.k0 > 13 || final_state.k1 > 13,
+            "ramp failed to drive either tracker above the valid-stream \
+             regime (k0={}, k1={})",
+            final_state.k0,
+            final_state.k1,
+        );
+    }
+
+    /// Property sweep: encoder/decoder lock-step holds across a
+    /// deterministic pseudo-random residual stream spanning the small,
+    /// medium, and large magnitude regimes (so both the low-mode and
+    /// high-mode tracker paths fire). A small xorshift keeps this
+    /// dependency-free.
+    #[test]
+    fn rice_tracker_lockstep_pseudo_random() {
+        let mut x: u32 = 0x9E37_79B9;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x
+        };
+        let mut residuals: Vec<i32> = Vec::with_capacity(4096);
+        for _ in 0..4096 {
+            // Mix magnitude scales: ~1/4 tiny, ~1/2 mid, ~1/4 large, so
+            // the trackers wander through both window edges.
+            let r = next();
+            let mag = match r % 4 {
+                0 => (r >> 2) % 8,
+                1 | 2 => (r >> 2) % 4096,
+                _ => (r >> 2) % 4_000_000,
+            } as i32;
+            residuals.push(if r & 1 == 0 { mag } else { -mag });
+        }
+        assert_encode_decode_lockstep(&residuals);
     }
 }

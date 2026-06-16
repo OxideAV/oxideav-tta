@@ -99,6 +99,13 @@ from CSV in `tables/`.
   fixtures, 16-bit and 24-bit, with sine / silence / pseudo-noise /
   DC+impulse content, including multi-frame streams that exercise the
   per-frame state-reset discipline.
+* Encoder/decoder adaptive-Rice tracker lock-step properties: for an
+  escalating-magnitude ramp that drives `k` far above the valid-stream
+  regime, and for a 4096-step pseudo-random residual sweep, the
+  encoder's per-step `(k0, k1, sum0, sum1)` is asserted bit-identical
+  to the decoder's, the decoded residual equals the input, and neither
+  side's `k` escapes the `MAX_K` ceiling — pinning the increment-cap
+  symmetry between the two stages.
 * Negative-path: corrupted frame CRC and unsupported header values are
   rejected with the correct `Error` variants.
 

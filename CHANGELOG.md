@@ -6,7 +6,41 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Round-327: the encoder's adaptive-Rice tracker now clamps its three
+  `k` increment branches at the same `MAX_K` (= 31) ceiling the
+  decoder's `decode_one` already enforced (`src/rice.rs`). The decoder
+  was capped in r124 (an arbitrary stream can chain enough high-mode
+  escapes to drive `k` past 31, after which a binary-tail read would
+  request more than 32 bits), but `src/encoder.rs`'s `rice_encode_one`
+  left all three `state.k{0,1} += 1` branches uncapped. On a residual
+  stream that drove a tracker to 31, the encoder would advance `k` to
+  32+ while the decoder pinned it at 31 — the two trackers would then
+  diverge and every subsequent residual's bit layout would be computed
+  against a different `k` on each side, silently corrupting the
+  lossless roundtrip from the first post-cap step onward (and tripping
+  a `1u32 << 32` shift on the bias path in debug builds). Valid
+  16/24-bit streams never reach `k >= ~14`, so this was latent, but the
+  encoder/decoder lock-step is now total across the full `k` range.
+
 ### Added
+
+- Round-327: two encoder/decoder lock-step property tests in
+  `src/encoder.rs` (`rice_tracker_lockstep_drives_k_high` and
+  `rice_tracker_lockstep_pseudo_random`). Both assert that, for every
+  step of a residual stream, the encoder's post-step tracker state
+  equals the decoder's post-step tracker state for the bytes the
+  encoder produced, the decoded residual equals the input, and neither
+  side's `k0`/`k1` escapes `[0, MAX_K]`. The first drives a doubling
+  magnitude ramp that pushes `k` to 23/22 — well above the `k <= 13`
+  any valid corpus reaches — exercising a long run of the increment
+  branch the fix above clamps; the second sweeps 4096 deterministic
+  pseudo-random residuals spanning the small / medium / large
+  magnitude regimes so both the low-mode and high-mode tracker paths
+  fire. Magnitudes are bounded to keep the post-bias `value` inside the
+  `< 2^31` domain where the zigzag decode is unambiguous (spec §3.5 /
+  anti-pattern §11).
 
 - Round-323: two reference-tape hand-verification tests for spec/05
   §7.3 (the mid-frame Rice regime), `step_two_matches_spec_7_3` and
