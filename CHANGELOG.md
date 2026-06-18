@@ -26,6 +26,26 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-331: a continuous-stream chained Rice-decode test
+  (`chained_stream_steps_0_1_2_matches_spec_7_1_7_3` in `src/rice.rs`).
+  The existing spec/05 §7 hand-verifications each construct a fresh body
+  and read exactly one codeword from a byte-aligned start, so the
+  cross-codeword bit-cache carry — the production decode path where the
+  second and subsequent `read_unary`/`read_bits` calls begin from a
+  partially-consumed cache rather than an empty one — was never directly
+  asserted. This test concatenates the steps 0/1/2 codewords (§7.1 →
+  §7.2 → §7.3-step-2) into one 37-bit LSB-first body
+  (`[0x00, 0xD8, 0x80, 0xDB, 0x00]`), bootstraps the tracker state once
+  from the `RICE_K_INIT` constants `(10, 10, 0x4000, 0x4000)` per §4.2,
+  and decodes all three codewords back-to-back through a single
+  `BitReader`, threading each step's post-state unmodified into the next
+  step's pre-state exactly as the §7.6 bulk-verification methodology
+  prescribes. Codeword boundaries fall mid-byte at bit 11 (inside byte
+  1, 5 carried cache bits) and at the byte-3 boundary (bit 24), so the
+  cache-carry path is exercised twice. Residuals `(0, 1026, 1038)` and
+  every post-state field are asserted bit-for-bit against the spec tape,
+  and `bytes_consumed() == 5` pins the exact bit-budget.
+
 - Round-327: two encoder/decoder lock-step property tests in
   `src/encoder.rs` (`rice_tracker_lockstep_drives_k_high` and
   `rice_tracker_lockstep_pseudo_random`). Both assert that, for every

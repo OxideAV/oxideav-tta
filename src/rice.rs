@@ -447,4 +447,84 @@ mod tests {
         // Low mode never touches sum1 (§7.6 quiet-regime note).
         assert_eq!(state.sum1, 12_279);
     }
+
+    /// Continuous-stream chain for spec §7.1 → §7.2 → §7.3-step-2,
+    /// decoded from a SINGLE `BitReader` bootstrapped from the
+    /// `RICE_K_INIT` constants `(10, 10, 0x4000, 0x4000)` (§4.2). Unlike
+    /// the per-step tests above — each of which constructs its own body
+    /// and reads exactly one codeword starting at a fresh byte boundary
+    /// — this test concatenates the steps 0/1/2 codewords into one
+    /// LSB-first body and decodes them back-to-back through one reader,
+    /// so the second and third `read_unary`/`read_bits` calls begin from
+    /// a *partially-consumed* bit cache, not an empty one.
+    ///
+    /// Step 0's codeword is 11 bits (`u=0`, `k0=10` tail of 0); step 1's
+    /// is 13 bits (`u=2` + terminator + `k1=10` tail of 515); step 2's
+    /// is 13 bits (`u=2` + terminator + `k1=10` tail of 27). The stream
+    /// is therefore 37 bits packed into 5 bytes
+    /// `[0x00, 0xD8, 0x80, 0xDB, 0x00]`, with codeword boundaries falling
+    /// mid-byte at bit 11 (inside byte 1) and bit 24 (the byte-3
+    /// boundary). The cross-codeword bit-cache carry exercised here — 5
+    /// leftover cache bits threaded from step 0 into step 1's unary
+    /// read, then 3 from step 1 into step 2 — is the production decode
+    /// path that the byte-aligned single-codeword tests never reach. The
+    /// state-chain assertion (each step's post-state used unmodified as
+    /// the next step's pre-state) mirrors the spec §7.6 bulk-verification
+    /// methodology: bootstrap once from `RICE_K_INIT`, thread post→pre.
+    #[test]
+    fn chained_stream_steps_0_1_2_matches_spec_7_1_7_3() {
+        let mut bits = Vec::new();
+        push_codeword(&mut bits, 0, 10, 0); // step 0: §7.1
+        push_codeword(&mut bits, 2, 10, 515); // step 1: §7.2
+        push_codeword(&mut bits, 2, 10, 27); // step 2: §7.3
+        assert_eq!(bits.len(), 37, "stream must be exactly 37 bits");
+        let body = pack_lsb_first(&bits);
+        assert_eq!(
+            body,
+            [0x00, 0xD8, 0x80, 0xDB, 0x00],
+            "packed body must match the hand-computed LSB-first layout"
+        );
+
+        // Bootstrap from RICE_K_INIT (§4.2); a SINGLE reader for all 3.
+        let mut reader = BitReader::new(&body);
+        let mut state = RiceState::frame_init();
+        assert_eq!(
+            (state.k0, state.k1, state.sum0, state.sum1),
+            (10, 10, 0x4000, 0x4000),
+            "pre-state must be the frame-entry constants"
+        );
+
+        // Step 0 — §7.1: low-mode zero, k0 demotes 10→9.
+        let e0 = decode_one(&mut reader, &mut state).unwrap();
+        assert_eq!(e0, 0, "step 0 residual (§7.1)");
+        assert_eq!(
+            (state.k0, state.k1, state.sum0, state.sum1),
+            (9, 10, 15_360, 16_384),
+            "step 0 post-state (§7.1)"
+        );
+
+        // Step 1 — §7.2: high-mode escape, bias from k0_pre=9, k0 back to 10.
+        // This call's read_unary begins with 5 carried cache bits (bit 11
+        // of the stream, inside byte 1) — never an empty cache.
+        let e1 = decode_one(&mut reader, &mut state).unwrap();
+        assert_eq!(e1, 1026, "step 1 residual (§7.2)");
+        assert_eq!(
+            (state.k0, state.k1, state.sum0, state.sum1),
+            (10, 10, 16_451, 16_899),
+            "step 1 post-state (§7.2)"
+        );
+
+        // Step 2 — §7.3: steady-state, both trackers inside the 2x window.
+        // Begins at bit 24 (the byte-3 boundary) with a fresh-byte refill.
+        let e2 = decode_one(&mut reader, &mut state).unwrap();
+        assert_eq!(e2, 1038, "step 2 residual (§7.3)");
+        assert_eq!(
+            (state.k0, state.k1, state.sum0, state.sum1),
+            (10, 10, 17_498, 16_894),
+            "step 2 post-state (§7.3)"
+        );
+
+        // All 5 body bytes consumed by the 3 codewords (37 bits → 5 bytes).
+        assert_eq!(reader.bytes_consumed(), 5, "all body bytes consumed");
+    }
 }

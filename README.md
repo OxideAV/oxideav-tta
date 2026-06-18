@@ -94,7 +94,13 @@ from CSV in `tables/`.
   residual's zigzag sign branch — each asserted bit-for-bit against the
   spec, residual plus all four post-state trackers, with the §7.3
   step-16 post-state pinned to the §7.4 step-17 pre-state so the
-  worked-step walk forms an unbroken chain.
+  worked-step walk forms an unbroken chain. A continuous-stream chain
+  test decodes the §7.1/§7.2/§7.3-step-2 codewords back-to-back through
+  a single bit reader (one 37-bit body across 5 packed bytes, state
+  bootstrapped once from `RICE_K_INIT`), exercising the cross-codeword
+  bit-cache carry
+  that the per-codeword tests — each starting at a fresh byte boundary —
+  never reach.
 * Full encode→decode roundtrips on mono / stereo / six-channel
   fixtures, 16-bit and 24-bit, with sine / silence / pseudo-noise /
   DC+impulse content, including multi-frame streams that exercise the
