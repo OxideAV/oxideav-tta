@@ -119,9 +119,12 @@ from CSV in `tables/`.
 
 `cargo-fuzz` targets under `fuzz/fuzz_targets/` cover the decoder,
 demuxer, encode roundtrip, streaming/random-access decode, sample
-ranges, password streaming, trailer scanning, and differential checks
-of the typed header and trailer accessors. The contract is
-panic-freedom on arbitrary input.
+ranges, password streaming, trailer scanning, the framework
+`Decoder`-trait adapter (`registry_decode`: open_demuxer →
+`first_decoder` → `send_packet`/`receive_frame`/`flush`, asserting the
+`AudioFrame` packed-plane length equals `samples * channels *
+bytes_per_sample`), and differential checks of the typed header and
+trailer accessors. The contract is panic-freedom on arbitrary input.
 
 ```sh
 cargo +nightly fuzz run decode -- -max_total_time=60

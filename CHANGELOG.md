@@ -26,6 +26,26 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-336 (saturated-crate depth mode, fuzz): a `registry_decode`
+  `cargo-fuzz` target (`fuzz/fuzz_targets/registry_decode.rs`) that
+  drives the framework `oxideav_core::Decoder` trait adapter — the
+  surface `oxideav-meta::register_all` hands the host. The existing
+  `decode` target hammers the free function `oxideav_tta::decode` and
+  the round-299 `demuxer` target hammers the registered `Demuxer`, but
+  neither runs the registered `Decoder` adapter (`TtaDecoder`): the
+  `send_packet` → `receive_frame` → `flush` state machine, the channel /
+  bits-per-sample sanity rails it checks against the demuxer-configured
+  `CodecParameters`, and the `pcm_pack_for_format` repack that turns the
+  decoder's interleaved `i32` samples into the `AudioFrame` byte layout
+  (S16 → 2 bytes LE, S24 → 3 bytes LE). The target stitches both halves
+  of the framework pipeline together exactly as a host does
+  (`open_demuxer` → `first_decoder` from the stream's `CodecParameters`
+  → `send_packet`/`receive_frame`/`flush`) and, on every frame the
+  decoder produces, asserts the packed-plane length equals
+  `samples * channels * bytes_per_sample` so the packer can neither drop
+  nor duplicate a sample. 7.9M iterations against the seeded
+  demuxer/decode corpora ran panic-free. Registered as the tenth fuzz
+  bin in `fuzz/Cargo.toml`.
 - Round-331: a continuous-stream chained Rice-decode test
   (`chained_stream_steps_0_1_2_matches_spec_7_1_7_3` in `src/rice.rs`).
   The existing spec/05 §7 hand-verifications each construct a fresh body

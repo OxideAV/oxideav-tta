@@ -95,6 +95,17 @@ cargo-fuzz = true
 #   rejection side through hand-constructed `TrailerInfo` literals so
 #   the typed accessors are pinned to the exact §7 predicate windows
 #   (`InvalidId3v1Range` / `InvalidApeV2Range`).
+# - **`registry_decode`** (round 336): panic-free walk of the framework
+#   `oxideav_core::Decoder` trait adapter — the surface
+#   `oxideav-meta::register_all` hands the host. The `decode` target hits
+#   the free function and the `demuxer` target hits the `Demuxer`; this
+#   stitches them together (open_demuxer -> `first_decoder` from the
+#   stream's `CodecParameters` -> `send_packet` / `receive_frame` /
+#   `flush`), driving `make_decoder`'s `SampleFormat`->bps mapping, the
+#   channel / bps sanity rails, and the `pcm_pack_for_format` repack.
+#   Asserts the AudioFrame packed-plane length equals
+#   `samples * channels * bytes_per_sample` for the configured output
+#   format so the packer can neither drop nor duplicate a sample.
 [dependencies]
 libfuzzer-sys = "0.4"
 
@@ -171,5 +182,11 @@ doc = false
 [[bin]]
 name = "trailer_typed"
 path = "fuzz_targets/trailer_typed.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "registry_decode"
+path = "fuzz_targets/registry_decode.rs"
 test = false
 doc = false
