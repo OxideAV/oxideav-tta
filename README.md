@@ -8,8 +8,9 @@ bit-exactly through the decoder.
 ## What works
 
 * **Decode + encode of TTA1 format=1** (integer PCM) and **format=2**
-  (password-derived `qm` priming). Signed 16-bit and 24-bit LE PCM,
-  1..=6 channels.
+  (password-derived `qm` priming). Signed PCM at every in-scope bit
+  depth — 16..=24 bits (widths 17..23 packed MSB-aligned in 3 bytes
+  per `spec/01` §3.2) — and 1..=6 channels.
 * **Full decode pipeline** — bitstream framing with IEEE-802.3 CRC32
   verification at the header, seek table, and per-frame trailer;
   adaptive Rice entropy coding; the Stage-A 8-tap sign-LMS predictor;
@@ -101,10 +102,26 @@ from CSV in `tables/`.
   bit-cache carry
   that the per-codeword tests — each starting at a fresh byte boundary —
   never reach.
-* Full encode→decode roundtrips on mono / stereo / six-channel
-  fixtures, 16-bit and 24-bit, with sine / silence / pseudo-noise /
-  DC+impulse content, including multi-frame streams that exercise the
-  per-frame state-reset discipline.
+* Full encode→decode roundtrips across the parameter matrix: channel
+  counts 1..=6 (every intermediate count, so the odd-N decorrelation
+  cascade `spec/04` §4.3 warns must not be parity-special-cased is
+  exercised at N=3 and N=5) and bit depths 16..=24 (including the
+  non-multiple-of-8 widths 17..23, which share `byte_depth = 3` and the
+  LMS `shift = 10` row with 24-bit per `spec/01` §3.2). Content spans
+  sine / silence / pseudo-noise / DC+impulse / full-scale-impulse,
+  including multi-frame streams that exercise the per-frame state-reset
+  discipline.
+* Encoder seek-table structural invariant (`spec/01` §4.2 / §4.3): the
+  encoder's own bytes are re-parsed through the framing parser and each
+  entry is asserted to equal the true on-disk frame footprint, the
+  offsets to chain exactly, the entry-bytes CRC to validate, the
+  per-frame sample counts to sum to `total_samples` (with only the last
+  frame short, and a *full* last frame on the `raw == 0` exact-multiple
+  case), and every per-frame trailing CRC to match its body. The
+  encoder-produced table is then driven through the decoder's
+  random-access API (`decode_frame_at` / `seek_to_sample` /
+  `frame_iter`) and asserted bit-exact against eager `decode_all` on
+  3-channel, 5-channel, and 19-bit-mono multi-frame streams.
 * Encoder/decoder adaptive-Rice tracker lock-step properties: for an
   escalating-magnitude ramp that drives `k` far above the valid-stream
   regime, and for a 4096-step pseudo-random residual sweep, the
