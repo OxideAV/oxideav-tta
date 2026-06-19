@@ -2617,3 +2617,268 @@ fn seek_point_typed_accessors_match_parsed_stream() {
         );
     }
 }
+
+// ---------------------------------------------------------------------
+// Bit-depth edge cases: 17..=23 bps (spec/01 §3.2).
+//
+// `spec/01-bitstream-framing.md` §3.2 derives `byte_depth = (bps + 7)
+// / 8`. Every bit depth in `17..=23` shares `byte_depth == 3` with the
+// canonical 24-bit case and therefore drives the LMS `shift`/`round`
+// table index 2 (`shift = 10`, per `tables/lms-shift.csv`), exactly as
+// 24-bit does. The whole codec pipeline (LMS, Stage-B, Rice,
+// decorrelation) operates on signed `i32` and is bit-depth agnostic
+// past the byte-depth-keyed `shift`; only the on-disk `bits_per_sample`
+// field and the PCM packing width change. These tests pin that the
+// non-multiple-of-8 bit depths round-trip bit-exactly through
+// `encode` → `decode`, closing a coverage gap left by the prior
+// suite's 16-/24-only fixtures.
+//
+// Sample magnitudes are kept inside the signed range each bit depth
+// can carry (`±2^(bps-1) − 1`) so the encoder's input is a faithful
+// PCM stream for that width; the codec never clamps, so an in-range
+// input is the meaningful round-trip target.
+
+/// Largest positive magnitude representable in `bps`-bit signed PCM.
+fn signed_amp(bps: u16) -> i32 {
+    (1i32 << (bps - 1)) - 1
+}
+
+#[test]
+fn roundtrip_mono_17bit_sine() {
+    let n = (44_100.0 * 0.05) as usize;
+    let samples = sine(n, 1, 44_100, 440.0, signed_amp(17) / 2);
+    assert_roundtrip(&samples, 1, 17, 44_100);
+}
+
+#[test]
+fn roundtrip_mono_20bit_sine() {
+    let n = (44_100.0 * 0.05) as usize;
+    let samples = sine(n, 1, 44_100, 440.0, signed_amp(20) / 2);
+    assert_roundtrip(&samples, 1, 20, 44_100);
+}
+
+#[test]
+fn roundtrip_mono_23bit_sine() {
+    let n = (44_100.0 * 0.05) as usize;
+    let samples = sine(n, 1, 44_100, 440.0, signed_amp(23) / 2);
+    assert_roundtrip(&samples, 1, 23, 44_100);
+}
+
+#[test]
+fn roundtrip_stereo_18bit_pseudo_noise() {
+    // 18-bit (byte_depth 3) stereo noise exercises the truncating-`/2`
+    // decorrelation discriminator (spec/04 §6) at a non-24 width.
+    let samples = pseudo_noise(
+        2_048,
+        2,
+        signed_amp(18) | (signed_amp(18) >> 4),
+        0xABCD_1234,
+    );
+    assert_roundtrip(&samples, 2, 18, 44_100);
+}
+
+#[test]
+fn roundtrip_stereo_21bit_uncorrelated_sines() {
+    let n_per_ch = (44_100.0 * 0.05) as usize;
+    let amp_l = signed_amp(21) / 2;
+    let amp_r = signed_amp(21) / 3;
+    let mut samples = Vec::with_capacity(n_per_ch * 2);
+    for s in 0..n_per_ch {
+        let phase_l = 2.0 * std::f64::consts::PI * 440.0 * s as f64 / 44_100.0;
+        let phase_r = 2.0 * std::f64::consts::PI * 660.0 * s as f64 / 44_100.0;
+        samples.push((phase_l.sin() * amp_l as f64).round() as i32);
+        samples.push((phase_r.sin() * amp_r as f64).round() as i32);
+    }
+    assert_roundtrip(&samples, 2, 21, 44_100);
+}
+
+#[test]
+fn roundtrip_multi_frame_mono_19bit_44100() {
+    // 2.5 s spans 3 frames at a 19-bit (byte_depth 3) width — pins the
+    // per-frame state-reset discipline at a non-multiple-of-8 depth.
+    let n = 110_250;
+    let samples = sine(n, 1, 44_100, 440.0, signed_amp(19) / 2);
+    assert_roundtrip(&samples, 1, 19, 44_100);
+}
+
+#[test]
+fn roundtrip_full_scale_22bit_dc_and_impulse() {
+    // Drive the predictor with a near-full-scale DC level plus a single
+    // full-scale impulse so the residual swings the full 22-bit range,
+    // confirming no overflow in the byte_depth-3 packing path.
+    let amp = signed_amp(22);
+    let mut samples = vec![amp / 4; 1024];
+    samples[256] = amp;
+    samples[768] = -amp;
+    assert_roundtrip(&samples, 1, 22, 44_100);
+}
+
+// ---------------------------------------------------------------------
+// Odd / intermediate channel-count cascade (spec/04 §4.3).
+//
+// `spec/04-decorrelation.md` §4.3 states there is **no special case**
+// for odd channel counts: the inverse cascade is "a single chain walk
+// with one anchor at `N-1`" for every `N >= 2`, and anti-pattern §9.4
+// flags any parity-conditional code path as a divergence source. The
+// prior suite covered `nch ∈ {1, 2, 6}` but never `{3, 4, 5}`, leaving
+// the odd-N (`3`, `5`) and the even-but-non-6 (`4`) cascade walks
+// unexercised. These round-trips drive each intermediate channel count
+// with independent per-channel content (so the forward differences are
+// non-trivial on every channel pair), closing that gap.
+
+/// Build an `nch`-channel interleaved PCM buffer where each channel
+/// carries an independent sine of a distinct frequency/amplitude, so
+/// the decorrelation forward differences are non-zero on every pair.
+fn multi_sine(n_per_ch: usize, nch: u16, bps: u16) -> Vec<i32> {
+    let base_amp = signed_amp(bps) / 3;
+    let mut out = Vec::with_capacity(n_per_ch * nch as usize);
+    for s in 0..n_per_ch {
+        for ch in 0..nch {
+            let freq = 200.0 * (1.0 + 0.17 * ch as f64);
+            let phase = 2.0 * std::f64::consts::PI * freq * s as f64 / 44_100.0;
+            let amp = base_amp as f64 * (1.0 - 0.08 * ch as f64);
+            out.push((phase.sin() * amp).round() as i32);
+        }
+    }
+    out
+}
+
+#[test]
+fn roundtrip_three_channel_16bit() {
+    // N=3: the canonical odd-N cascade (anchor at ch2, walk to ch0).
+    let samples = multi_sine(1_024, 3, 16);
+    assert_roundtrip(&samples, 3, 16, 44_100);
+}
+
+#[test]
+fn roundtrip_four_channel_16bit() {
+    // N=4: even but not 6 — two intermediate forward-difference channels.
+    let samples = multi_sine(1_024, 4, 16);
+    assert_roundtrip(&samples, 4, 16, 44_100);
+}
+
+#[test]
+fn roundtrip_five_channel_16bit() {
+    // N=5: the other odd-N cascade.
+    let samples = multi_sine(1_024, 5, 16);
+    assert_roundtrip(&samples, 5, 16, 44_100);
+}
+
+#[test]
+fn roundtrip_three_channel_24bit_pseudo_noise() {
+    // N=3 at 24-bit with uncorrelated per-channel noise exercises the
+    // odd-N cascade together with the truncating-`/2` sign discipline
+    // (spec/04 §6) on a wide dynamic range. Distinct seeds per channel
+    // keep the forward differences large and signed.
+    let n_per_ch = 1_536;
+    let mut samples = Vec::with_capacity(n_per_ch * 3);
+    let mask = signed_amp(24);
+    let per_ch: Vec<Vec<i32>> = (0..3u64)
+        .map(|c| pseudo_noise(n_per_ch, 1, mask, 0x5EED_0000 + c))
+        .collect();
+    for s in 0..n_per_ch {
+        for ch in &per_ch {
+            samples.push(ch[s]);
+        }
+    }
+    assert_roundtrip(&samples, 3, 24, 44_100);
+}
+
+#[test]
+fn roundtrip_five_channel_multi_frame_44100() {
+    // N=5 across 3 frames pins the odd-N cascade together with the
+    // per-frame predictor/Rice reset for an intermediate channel count.
+    let samples = multi_sine(110_250, 5, 16);
+    assert_roundtrip(&samples, 5, 16, 44_100);
+}
+
+// ---------------------------------------------------------------------
+// Encoder-produced seek table is valid for the decoder's random-access
+// API across the new shapes (milestone: drive encode + seek toward
+// decode parity).
+//
+// The encoder writes one seek-table entry per frame (`spec/01` §4.2,
+// each entry = on-disk frame size including the trailing CRC). These
+// tests confirm the entries the *encoder* produces let the *decoder*'s
+// `decode_frame_at` / `seek_to_sample` / `frame_iter` random-access
+// paths land bit-exactly, for the intermediate channel counts and
+// non-multiple-of-8 bit depths added above — i.e. the seek table is
+// correct for shapes the prior seek suite (mono/stereo at 16/24) never
+// covered.
+
+/// Assert that every random-access decode path agrees with the eager
+/// `decode_all` for an encoder-produced multi-frame stream.
+#[track_caller]
+fn assert_random_access_parity(samples: &[i32], channels: u16, bps: u16, sample_rate: u32) {
+    let tta = encode(samples, channels, bps, sample_rate).expect("encode should succeed");
+    let dec = crate::Decoder::new(&tta).expect("Decoder::new");
+    let eager = dec.decode_all().expect("decode_all");
+    assert_eq!(eager, samples, "eager decode must match the encoder input");
+
+    let n_frames = dec.frames.len();
+    assert!(n_frames >= 2, "fixture must be multi-frame for this test");
+
+    // frame_iter concatenation equals eager.
+    let mut streamed = Vec::new();
+    for r in dec.frame_iter() {
+        streamed.extend_from_slice(&r.expect("frame_iter decode"));
+    }
+    assert_eq!(streamed, eager, "frame_iter must equal decode_all");
+
+    // decode_frame_at on every frame, concatenated, equals eager.
+    let mut by_index = Vec::new();
+    for i in 0..n_frames {
+        by_index.extend_from_slice(&dec.decode_frame_at(i).expect("decode_frame_at"));
+    }
+    assert_eq!(
+        by_index, eager,
+        "decode_frame_at concat must equal decode_all"
+    );
+
+    // seek_to_sample at a few interior sample positions lands on a frame
+    // whose decoded PCM is the matching slice of the eager output.
+    let nch = channels as usize;
+    let regular = ((sample_rate as u64) * 256 / 245) as usize;
+    let total = samples.len() / nch;
+    for &target in &[0usize, regular, regular + 1, regular * 2, total - 1] {
+        if target >= total {
+            continue;
+        }
+        let sp = dec.seek_to_sample(target as u64).expect("seek_to_sample");
+        let frame_start = sp.frame_index * regular;
+        let frame_pcm = dec
+            .decode_frame_at(sp.frame_index)
+            .expect("decode_frame_at after seek");
+        // The frame containing `target` must reproduce the eager slice.
+        let expected = &eager[frame_start * nch..frame_start * nch + frame_pcm.len()];
+        assert_eq!(
+            frame_pcm, expected,
+            "seek_to_sample({target}) frame {} mismatch",
+            sp.frame_index
+        );
+        // And the target sample sits inside this frame.
+        assert!(
+            (sp.sample_offset_in_frame as usize) < frame_pcm.len() / nch,
+            "target {target} offset out of frame bounds"
+        );
+    }
+}
+
+#[test]
+fn encoder_seek_table_random_access_three_channel_multi_frame() {
+    let samples = multi_sine(110_250, 3, 16);
+    assert_random_access_parity(&samples, 3, 16, 44_100);
+}
+
+#[test]
+fn encoder_seek_table_random_access_19bit_mono_multi_frame() {
+    let n = 110_250;
+    let samples = sine(n, 1, 44_100, 440.0, signed_amp(19) / 2);
+    assert_random_access_parity(&samples, 1, 19, 44_100);
+}
+
+#[test]
+fn encoder_seek_table_random_access_five_channel_multi_frame() {
+    let samples = multi_sine(110_250, 5, 16);
+    assert_random_access_parity(&samples, 5, 16, 44_100);
+}

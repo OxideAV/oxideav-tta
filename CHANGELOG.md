@@ -26,6 +26,28 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-345 (encode + seek parity, edge-case coverage): self-roundtrip
+  tests for the bit-depth and channel-count shapes the prior suite left
+  unexercised. (1) Bit depths `17..=23` (`spec/01` §3.2 derives
+  `byte_depth = (bps + 7) / 8`, so each shares `byte_depth == 3` with
+  24-bit and the LMS `shift = 10` table row) now have mono / stereo /
+  multi-frame / full-scale-impulse round-trips at 17, 18, 19, 20, 21,
+  22, 23 bps — the codec's i32 pipeline was already bit-depth agnostic
+  past the byte-depth-keyed `shift`, and these pin it. (2) Channel
+  counts `3`, `4`, `5` (the intermediate cascade the prior `{1, 2, 6}`
+  fixtures skipped) now round-trip, including the odd-N walk `spec/04`
+  §4.3 warns must NOT be parity-special-cased, with a 24-bit
+  uncorrelated-noise N=3 case exercising the truncating-`/2` sign
+  discipline (`spec/04` §6) and an N=5 multi-frame case pinning the
+  per-frame reset. (3) Encoder-produced seek tables are verified valid
+  for the decoder's random-access API (`decode_frame_at` /
+  `seek_to_sample` / `frame_iter`, each bit-exact against eager
+  `decode_all`) on multi-frame 3-channel, 5-channel, and 19-bit-mono
+  streams — driving encode + seek toward parity with decode on shapes
+  the prior seek suite (mono/stereo at 16/24) never covered. All paths
+  pass bit-exactly; no implementation change was needed (the gaps were
+  untested, not broken).
+
 - Round-336 (saturated-crate depth mode, fuzz): a `registry_decode`
   `cargo-fuzz` target (`fuzz/fuzz_targets/registry_decode.rs`) that
   drives the framework `oxideav_core::Decoder` trait adapter — the
