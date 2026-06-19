@@ -2882,3 +2882,167 @@ fn encoder_seek_table_random_access_five_channel_multi_frame() {
     let samples = multi_sine(110_250, 5, 16);
     assert_random_access_parity(&samples, 5, 16, 44_100);
 }
+
+// ---------------------------------------------------------------------
+// Encoder seek-table structural invariant (spec/01 §4.2).
+//
+// `spec/01-bitstream-framing.md` §4.2 fixes the on-wire meaning of each
+// seek-table entry: "the entry's stored value is the byte count of
+// frame `i`'s data, including the trailing CRC bytes," and the frame
+// offsets chain as `frame_start[i+1] = frame_start[i] + entry[i]`
+// starting at `header_size + seek_table_size`. The §4.3 CRC over the
+// `4 * frame_count` entry bytes must validate. These properties are
+// what make the encoder's output *seekable*; the random-access tests
+// above prove the decoder lands correctly, and this test proves the
+// encoder wrote a table whose entries are byte-for-byte the true
+// on-disk frame footprints (not merely a table the decoder happens to
+// tolerate).
+//
+// The check re-parses the encoder's own bytes through the framing
+// parser and asserts, for every frame: (a) the seek CRC matched,
+// (b) `disk_size` equals the real on-disk gap to the next frame (or to
+// end-of-stream for the last frame), (c) `body_size() == disk_size - 4`
+// and the trailing 4 bytes are the frame's stored CRC, (d) the
+// per-frame sample counts sum to `total_samples` with only the last
+// frame allowed to be short.
+
+#[track_caller]
+fn assert_encoder_seek_table_invariant(samples: &[i32], channels: u16, bps: u16, sample_rate: u32) {
+    let tta = encode(samples, channels, bps, sample_rate).expect("encode should succeed");
+
+    // Re-parse the framing layer from the encoder's own bytes.
+    let id3 = crate::header::skip_id3v2_prefix(&tta).expect("id3 skip");
+    assert_eq!(id3, 0, "encoder must not emit an ID3v2 prefix");
+    let (header, hdr_len) = crate::header::parse_stream_header(&tta).expect("parse header");
+    assert_eq!(hdr_len, 22, "stream header is 22 bytes (spec/01 §3)");
+
+    let seek_buf = &tta[hdr_len..];
+    let (fc, _) = header.frame_geometry();
+    let seek_table_size = (fc as usize) * 4 + 4;
+    let frame_data_start = (hdr_len + seek_table_size) as u64;
+    let (seek, consumed) =
+        crate::header::parse_seek_table(seek_buf, &header, frame_data_start).expect("parse seek");
+    assert!(
+        seek.crc_ok,
+        "encoder seek-table CRC must validate (spec/01 §4.3)"
+    );
+    assert_eq!(
+        consumed, seek_table_size,
+        "seek-table consumed bytes must equal 4*frame_count + 4"
+    );
+
+    let nch = channels as usize;
+    let total = (samples.len() / nch) as u32;
+    let frames = &seek.frames;
+    assert!(!frames.is_empty(), "stream must have at least one frame");
+
+    // (b) Offsets chain exactly; disk_size is the real gap to the next
+    // frame (or to end-of-stream for the last frame).
+    let mut expected_offset = frame_data_start;
+    let mut sample_sum: u64 = 0;
+    for (i, fd) in frames.iter().enumerate() {
+        assert_eq!(
+            fd.file_offset, expected_offset,
+            "frame {i} offset must chain from the running cursor (spec/01 §4.2)"
+        );
+        let next_offset = fd.file_offset + fd.disk_size as u64;
+        let on_disk_end = if fd.is_last {
+            tta.len() as u64
+        } else {
+            frames[i + 1].file_offset
+        };
+        assert_eq!(
+            next_offset, on_disk_end,
+            "frame {i} disk_size must equal the true on-disk footprint to the next boundary"
+        );
+
+        // (c) body + trailing CRC split, and the stored CRC matches the
+        // body bytes (the encoder wrote a self-consistent per-frame CRC).
+        assert_eq!(
+            fd.body_size(),
+            fd.disk_size - 4,
+            "body_size = disk_size - 4"
+        );
+        let body =
+            &tta[fd.file_offset as usize..(fd.file_offset as usize + fd.body_size() as usize)];
+        let stored_crc_off = fd.file_offset as usize + fd.body_size() as usize;
+        let stored_crc = u32::from_le_bytes(
+            tta[stored_crc_off..stored_crc_off + 4]
+                .try_into()
+                .expect("4 CRC bytes present"),
+        );
+        assert_eq!(
+            crate::crc32::crc32(body),
+            stored_crc,
+            "frame {i} trailing CRC must match its body bytes (spec/01 §5.4)"
+        );
+
+        // (d) only the last frame may be short.
+        if !fd.is_last {
+            assert_eq!(
+                fd.sample_count,
+                header.regular_frame_samples(),
+                "non-last frame {i} must carry a full regular sample count"
+            );
+        } else {
+            assert!(
+                fd.sample_count >= 1 && fd.sample_count <= header.regular_frame_samples(),
+                "last frame sample count must be in 1..=regular"
+            );
+        }
+        sample_sum += fd.sample_count as u64;
+        expected_offset = next_offset;
+    }
+    assert_eq!(
+        sample_sum, total as u64,
+        "per-frame sample counts must sum to total_samples (spec/01 §4.1)"
+    );
+    // The whole table accounts for exactly the file up to any trailer.
+    assert_eq!(
+        expected_offset,
+        tta.len() as u64,
+        "the frames must tile the file exactly (no trailer was written)"
+    );
+}
+
+#[test]
+fn encoder_seek_table_invariant_mono_16bit_multi_frame() {
+    let samples = sine(110_250, 1, 44_100, 440.0, 14_000);
+    assert_encoder_seek_table_invariant(&samples, 1, 16, 44_100);
+}
+
+#[test]
+fn encoder_seek_table_invariant_four_channel_24bit_multi_frame() {
+    let samples = multi_sine(110_250, 4, 24);
+    assert_encoder_seek_table_invariant(&samples, 4, 24, 44_100);
+}
+
+#[test]
+fn encoder_seek_table_invariant_exact_multiple_last_frame_full() {
+    // total_samples an exact multiple of regular_frame_samples: spec/01
+    // §4.1 says the last frame is then a *full* regular-length frame
+    // (the `raw == 0` branch), not a short one. regular = floor(44100 *
+    // 256 / 245) = 46080; 2 * 46080 = 92160 → exactly 2 full frames.
+    let regular = ((44_100u64 * 256) / 245) as usize;
+    let n = regular * 2;
+    let samples = sine(n, 1, 44_100, 660.0, 10_000);
+    assert_encoder_seek_table_invariant(&samples, 1, 16, 44_100);
+
+    // And confirm both frames report the full regular count.
+    let tta = encode(&samples, 1, 16, 44_100).expect("encode");
+    let (header, hdr_len) = crate::header::parse_stream_header(&tta).expect("parse header");
+    let (fc, _) = header.frame_geometry();
+    let (seek, _) = crate::header::parse_seek_table(
+        &tta[hdr_len..],
+        &header,
+        (hdr_len + (fc as usize) * 4 + 4) as u64,
+    )
+    .expect("parse seek");
+    assert_eq!(seek.frames.len(), 2);
+    assert_eq!(seek.frames[0].sample_count, regular as u32);
+    assert_eq!(
+        seek.frames[1].sample_count, regular as u32,
+        "exact-multiple last frame must be full regular length (spec/01 §4.1 raw==0 branch)"
+    );
+    assert!(seek.frames[1].is_last);
+}

@@ -26,6 +26,20 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-345 (encode + seek parity, seek-table structural invariant):
+  three tests that re-parse the encoder's own bytes through the framing
+  parser and pin the `spec/01` §4.2 seek-table contract directly,
+  rather than only relying on the decoder tolerating the table. For
+  every frame they assert: the §4.3 entry-bytes CRC validates; each
+  `disk_size` equals the true on-disk gap to the next frame (or to
+  end-of-stream for the last); `body_size() == disk_size - 4` with the
+  trailing 4 bytes being the frame's own CRC over its body (§5.4);
+  per-frame sample counts sum to `total_samples` with only the last
+  frame allowed short (§4.1); and the frames tile the file exactly with
+  no trailer. Covers mono-16, 4-channel-24, and the §4.1 `raw == 0`
+  exact-multiple case where the last frame must be a *full* regular
+  frame (verified both frames report the full `regular_frame_samples`).
+
 - Round-345 (encode + seek parity, edge-case coverage): self-roundtrip
   tests for the bit-depth and channel-count shapes the prior suite left
   unexercised. (1) Bit depths `17..=23` (`spec/01` §3.2 derives
