@@ -1042,8 +1042,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Round 127: criterion bench harnesses (decode / encode / roundtrip)
 - add cargo-fuzz decode harness; cap Rice k at 31
 - multi-frame format=2 trace coverage + audit/07 cleanups
-- drop one last libtta reference in src/trailers.rs module head
-- drop libtta cross-references and forbidden reference/source/ path citation
+- drop one last external-reference citation in src/trailers.rs module head
+- drop external-reference cross-references and forbidden reference/source/ path citation
 - ID3v1 + APEv2 trailer detection per spec/01 §7
 - Round 3 — production TTA1 encoder + framework Encoder impl
 - O(1) seek via TTA1 in-file seek table
@@ -1226,7 +1226,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `fuzz/corpus/decode/` is five real streams from the crate's own
   encoder. `.github/workflows/fuzz.yml` gives it a daily 30-minute
   budget via the org reusable `crate-fuzz.yml`. The harness body is
-  clean-room (no `libtta` oracle). Two regression unit tests in `rice`
+  clean-room (no external-reference oracle). Two regression unit tests in `rice`
   pin the cap behaviour found by the fuzzer.
 
 ### Fixed
@@ -1389,12 +1389,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Clean-room rebuild from a fresh orphan `master`. The previous
   implementation was retired by the OxideAV docs audit dated
-  2026-05-06 (FFmpeg source cited as the writeup's basis, not merely
+  2026-05-06 (external reference source cited as the writeup's basis, not merely
   as the trace-instrumentation host); the prior history is preserved
   on the `old` branch.
 - The new code is being written against the strict-isolation
   clean-room workspace at `docs/audio/tta-cleanroom/` (Specifier /
   Extractor / Implementer / Auditor roles, with explicit allow-list
   and forbidden-input list per role). The Implementer reads only
-  `spec/` + `tables/` + `reference/docs/`; libtta and
-  FFmpeg `libavcodec/tta*` are forbidden inputs.
+  `spec/` + `tables/` + `reference/docs/`; external reference
+  implementations and their source are forbidden inputs.
