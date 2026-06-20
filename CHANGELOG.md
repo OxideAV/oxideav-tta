@@ -41,6 +41,23 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `(12895, 4528)` under `/2` and would land `(12894, 4527)` under the
   wrong `>>1`).
 
+- Round-354 (decorrelation conformance, N>2 worked cascade): the
+  reference corpus has only stereo tapes (`spec/04` §7.3), so for N>2
+  the spec's algebraic substitution is the ground truth. New tests pin
+  every published intermediate of the §4.1 N=3 and N=4 encoder formulas
+  and the §4.3 six-step 5.1 (`nch=6`) inverse walk against `forward` /
+  `inverse` — not just the roundtrip endpoints — including an
+  odd-negative anchor delta so the cascade's `/2` stays on the §6
+  discriminating path. Adds §9 anti-pattern guards: odd channel counts
+  (N=3, N=5) use the same uniform chain walk with no parity special case
+  (#4); the `nch <= 1` branch is bounds-safe with no `buffer[-1]` index
+  (#7); the cascade is per-sample stateless (#6, verified by replaying a
+  probe across an intervening unrelated decorrelation). A dense
+  sign-balanced LCG grid drives `forward(inverse(.))` through 4000
+  vectors per channel count `2..=6` (20 000 total), exercising thousands
+  of odd-negative `/2` cases on the live cascade rather than a single
+  hand-picked operand.
+
 - Round-345 (encode + seek parity, seek-table structural invariant):
   three tests that re-parse the encoder's own bytes through the framing
   parser and pin the `spec/01` §4.2 seek-table contract directly,

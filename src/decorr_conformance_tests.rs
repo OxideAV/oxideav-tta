@@ -154,3 +154,175 @@ fn noise_tape_row_11_pins_truncating_divide() {
     let wrong_out0 = wrong_out1 - (-8_367); // 12894
     assert_ne!([wrong_out0, wrong_out1], [12_895, 4_528]);
 }
+
+// ---------------------------------------------------------------------
+// N > 2 worked cascade examples (spec §4.1 / §4.2 / §4.3).
+//
+// The reference corpus contains only stereo tapes (§7.3), so for N > 2
+// the spec's algebraic substitution is the ground truth. The spec
+// works the encoder forward formula and the decoder inverse cascade for
+// N=3, N=4, and the 6-channel 5.1 layout with exact intermediate
+// values; these tests pin every published intermediate, not just the
+// roundtrip endpoints.
+// ---------------------------------------------------------------------
+
+/// Spec §4.1 — N=3 with PCM `(A, B, C)`. The encoder produces:
+/// `enc[0] = B-A`, `enc[1] = C-B`, `enc[2] = C - (C-B)/2`. The spec
+/// works this verbatim; pin the exact encoder output, then confirm the
+/// §4.2 inverse cascade walks it back to `(A, B, C)`.
+#[test]
+fn cascade_n3_forward_intermediates_match_spec_4_1() {
+    // PCM (A,B,C) = (10, 25, 41); spec uses symbolic (A,B,C).
+    let pcm = [10i32, 25, 41];
+    let mut enc = pcm;
+    forward(&mut enc);
+    // enc[0] = B - A           = 15
+    // enc[1] = C - B           = 16
+    // enc[2] = C - (C-B)/2     = 41 - 8 = 33   (16/2 = 8, even)
+    assert_eq!(enc, [15, 16, 33], "spec §4.1 N=3 encoder intermediates");
+    // §4.2 inverse cascade: dec_out[2] = enc[2] + enc[1]/2;
+    //   dec_out[1] = dec_out[2] - enc[1]; dec_out[0] = dec_out[1]-enc[0]
+    inverse(&mut enc);
+    assert_eq!(enc, pcm, "spec §4.2 inverse must restore (A,B,C)");
+}
+
+/// Spec §4.1 worked example — N=4 with PCM `(A, B, C, D)` produces
+/// `(B-A, C-B, D-C, D - (D-C)/2)`. Pin every intermediate, then the
+/// §4.2 step-by-step inverse substitution.
+#[test]
+fn cascade_n4_forward_intermediates_match_spec_4_1() {
+    let pcm = [4i32, 9, 17, 30];
+    let mut enc = pcm;
+    forward(&mut enc);
+    // enc[0]=B-A=5  enc[1]=C-B=8  enc[2]=D-C=13  enc[3]=D-(D-C)/2=30-6=24
+    assert_eq!(enc, [5, 8, 13, 24], "spec §4.1 N=4 encoder intermediates");
+
+    // §4.2 worked inverse substitution (re-derive each dec_out step):
+    let (e0, e1, e2, e3) = (5i32, 8, 13, 24);
+    let out3 = e3 + e2 / 2; // = 24 + 6 = 30 = D
+    let out2 = out3 - e2; // = 30 - 13 = 17 = C
+    let out1 = out2 - e1; // = 17 - 8 = 9 = B
+    let out0 = out1 - e0; // = 9 - 5 = 4 = A
+    assert_eq!([out0, out1, out2, out3], pcm);
+
+    inverse(&mut enc);
+    assert_eq!(enc, pcm, "spec §4.2 inverse must restore (A,B,C,D)");
+}
+
+/// Spec §4.3 — the 6-channel 5.1 worked walk. The spec lists the six
+/// inverse steps explicitly for `nch = 6` (the cascade walks left across
+/// the entire array with one anchor at index 5). Pin the full step
+/// sequence against `inverse` and confirm there is no parity branch.
+#[test]
+fn cascade_n6_inverse_walk_matches_spec_4_3() {
+    // Choose dec_in so the §4.3 six-step walk is non-trivial in every
+    // lane (mix of signs, including an odd-negative at index 4 to keep
+    // the anchor's `/2` on the discriminating path).
+    let dec_in = [7i32, -3, 11, -5, -9, 40];
+    // Spec §4.3 explicit walk:
+    //   out[5] = in[5] + in[4]/2   = 40 + (-9/2 = -4) = 36
+    //   out[4] = out[5] - in[4]    = 36 - (-9) = 45
+    //   out[3] = out[4] - in[3]    = 45 - (-5) = 50
+    //   out[2] = out[3] - in[2]    = 50 - 11   = 39
+    //   out[1] = out[2] - in[1]    = 39 - (-3) = 42
+    //   out[0] = out[1] - in[0]    = 42 - 7    = 35
+    let mut buf = dec_in;
+    inverse(&mut buf);
+    assert_eq!(
+        buf,
+        [35, 42, 39, 50, 45, 36],
+        "spec §4.3 six-step 5.1 cascade walk",
+    );
+    // -9/2 is the discriminator: `/2 = -4` (toward zero) vs `>>1 = -5`.
+    // With `>>1` the anchor would be 35 and the whole walk would shift.
+    assert_eq!(-9i32 / 2, -4);
+    assert_eq!(-9i32 >> 1, -5);
+}
+
+/// Spec §4.3 anti-pattern #4 — odd channel counts have NO special case.
+/// N=3 and N=5 must use the same uniform chain walk as even counts; a
+/// parity-conditional path would corrupt them. We verify the forward
+/// transform of a deliberately asymmetric input round-trips identically
+/// at N=3 and N=5, and that the N=3 result is not some "mono-center +
+/// stereo pair" alternative (which would differ from the chain).
+#[test]
+fn odd_channel_counts_have_no_special_case() {
+    // N=3: a "mono center + L/R pair" misreading would treat ch1 as a
+    // passthrough center; the real cascade chains all three. The chain
+    // result is the forward()/inverse() pair below.
+    let pcm3 = [100i32, -40, 70];
+    let mut e3 = pcm3;
+    forward(&mut e3);
+    // Chain: e0=-140, e1=110, e2=70-(110/2)=70-55=15.
+    assert_eq!(e3, [-140, 110, 15]);
+    inverse(&mut e3);
+    assert_eq!(e3, pcm3);
+
+    // N=5: same uniform chain, no leftover handling.
+    let pcm5 = [3i32, -7, 12, -1, 25];
+    let mut e5 = pcm5;
+    forward(&mut e5);
+    inverse(&mut e5);
+    assert_eq!(e5, pcm5, "N=5 uniform chain must round-trip");
+}
+
+/// Spec §9 anti-pattern #7 — the `nch == 1` branch must be explicit and
+/// bounds-safe. A length-1 (or length-0) buffer must pass through the
+/// identity without indexing `buffer[N-2] = buffer[-1]`.
+#[test]
+fn mono_and_empty_are_passthrough_and_bounds_safe() {
+    let mut mono = [-12_345i32];
+    inverse(&mut mono);
+    assert_eq!(mono, [-12_345], "mono is identity");
+    forward(&mut mono);
+    assert_eq!(mono, [-12_345], "mono forward is identity");
+
+    let mut empty: [i32; 0] = [];
+    inverse(&mut empty); // must not panic
+    forward(&mut empty); // must not panic
+}
+
+/// Exhaustive forward/inverse roundtrip over a dense, sign-balanced
+/// input grid for every supported channel count `2..=6`. This drives
+/// the cascade through thousands of odd-negative `/2` cases (the
+/// truncation discriminator) per spec §6/§7.1, on the actual cascade
+/// rather than a single hand-picked operand.
+#[test]
+fn forward_inverse_roundtrip_dense_grid_n2_to_n6() {
+    // A small deterministic LCG, sign-balanced around zero.
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        // 17-bit signed range straddling zero, biased to hit many
+        // odd-negative values.
+        ((state >> 24) as i32 & 0x1_FFFF) - 0x1_0000
+    };
+    for nch in 2usize..=6 {
+        for _ in 0..4000 {
+            let pcm: Vec<i32> = (0..nch).map(|_| next()).collect();
+            let mut buf = pcm.clone();
+            forward(&mut buf);
+            inverse(&mut buf);
+            assert_eq!(buf, pcm, "roundtrip failed at nch={nch} pcm={pcm:?}");
+        }
+    }
+}
+
+/// Spec §4.4 / §8.3 — the cascade carries NO state across samples. Two
+/// independent sample slots fed the same `dec_in` must produce the same
+/// `dec_out` regardless of what was decorrelated before them. This
+/// guards anti-pattern #6 (carrying yesterday's `dec_out`).
+#[test]
+fn cascade_is_stateless_across_sample_slots() {
+    let probe = [9_001i32, -1_234, 5_678, -90, 42, -7];
+    let mut first = probe;
+    inverse(&mut first);
+
+    // Run an unrelated decorrelation in between, then re-run the probe.
+    let mut noise = [-1i32, 2, -3, 4, -5, 6];
+    inverse(&mut noise);
+
+    let mut second = probe;
+    inverse(&mut second);
+    assert_eq!(first, second, "decorrelation must be per-sample stateless");
+}
