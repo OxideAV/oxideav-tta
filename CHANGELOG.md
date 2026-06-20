@@ -26,6 +26,21 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-354 (decorrelation conformance, captured-tape ground truth):
+  a spec §04-anchored conformance suite that pins the channel-
+  decorrelation transform against *externally captured* reference-tape
+  values rather than only its own algebraic inverse. (1) All 31 rows of
+  the `spec/04` §7.1 stereo pseudo-noise table — the most discriminating
+  fixture in the corpus, with `dec_in[0]` spanning the full sign /
+  parity matrix — are asserted bit-for-bit against `inverse`; previously
+  only 2 of the 31 captured rows were tested. (2) The `spec/04` §6
+  truncating-divide table (six operands) is pinned, with each
+  odd-negative operand verified to diverge from arithmetic `>>1` by
+  exactly 1 LSB, so the half-step's toward-zero rounding is asserted
+  structurally and at the cascade output (row 11, `-8367`, lands
+  `(12895, 4528)` under `/2` and would land `(12894, 4527)` under the
+  wrong `>>1`).
+
 - Round-345 (encode + seek parity, seek-table structural invariant):
   three tests that re-parse the encoder's own bytes through the framing
   parser and pin the `spec/01` §4.2 seek-table contract directly,

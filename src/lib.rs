@@ -245,6 +245,9 @@ pub use crate::registry::{register, register_codecs, register_containers, CODEC_
 oxideav_core::register!("oxideav-tta", register);
 
 #[cfg(test)]
+mod decorr_conformance_tests;
+
+#[cfg(test)]
 mod roundtrip_tests;
 
 #[cfg(all(test, feature = "registry"))]
