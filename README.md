@@ -102,6 +102,26 @@ from CSV in `tables/`.
   bit-cache carry
   that the per-codeword tests — each starting at a fresh byte boundary —
   never reach.
+* Channel-decorrelation conformance (`spec/04`) pinned against captured
+  reference-tape ground truth, not only the cascade's own algebraic
+  inverse. All 31 rows of the §7.1 stereo pseudo-noise table — the
+  corpus's most discriminating fixture, with `dec_in[0]` spanning the
+  full sign/parity matrix — are asserted bit-for-bit against the inverse
+  cascade. The §6 truncating-divide table is pinned operand-by-operand,
+  each odd-negative case verified to diverge from arithmetic `>>1` by
+  exactly 1 LSB (row 11 lands `(12895, 4528)` under `/2`, `(12894,
+  4527)` under the wrong shift). For N>2 (the corpus has only stereo
+  tapes, so §7.3 makes the spec's algebraic substitution the ground
+  truth) every published intermediate of the §4.1 N=3/N=4 encoder
+  formulas and the §4.3 six-step 5.1 walk is pinned, the §9
+  anti-patterns are guarded (no odd-N parity branch, bounds-safe mono,
+  per-sample statelessness), and a dense 20 000-vector LCG grid drives
+  `forward(inverse(.))` through thousands of odd-negative `/2` cases per
+  channel count 2..=6. A trace-tape end-to-end check then confirms the
+  *full decode pipeline* runs exactly that cascade: every per-sample
+  `DECORR_PRE`→`DECORR_POST` transition on real codec-produced stereo /
+  3-channel / 6-channel noise streams is reproduced by `inverse`, and
+  `PCM_OUT` equals `DECORR_POST` per §1.
 * Full encode→decode roundtrips across the parameter matrix: channel
   counts 1..=6 (every intermediate count, so the odd-N decorrelation
   cascade `spec/04` §4.3 warns must not be parity-special-cased is

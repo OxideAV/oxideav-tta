@@ -58,6 +58,19 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of odd-negative `/2` cases on the live cascade rather than a single
   hand-picked operand.
 
+- Round-354 (decorrelation conformance, end-to-end pipeline): trace-tape
+  tests (gated on the `trace` feature) that prove the *full decode
+  pipeline* runs exactly the isolated `inverse` cascade. A pseudo-noise
+  stream is encoded then decoded with the tape on; every per-sample
+  `DECORR_PRE` → `DECORR_POST` transition the live decoder emits is
+  parsed back and asserted to equal `inverse(raw_per_channel)`, and
+  `PCM_OUT.final_per_channel` is asserted to equal
+  `DECORR_POST.decorrelated_per_channel` per `spec/04` §1 (PCM_OUT ==
+  DECORR_POST for N>1). Run at stereo, 3-channel, and 6-channel — the
+  last two close the §7.3 N>2 corpus gap against the live decoder rather
+  than only the spec's algebraic substitution, on noise content that
+  spans the full sign/parity matrix the §7.1 stereo table samples.
+
 - Round-345 (encode + seek parity, seek-table structural invariant):
   three tests that re-parse the encoder's own bytes through the framing
   parser and pin the `spec/01` §4.2 seek-table contract directly,

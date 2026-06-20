@@ -326,3 +326,141 @@ fn cascade_is_stateless_across_sample_slots() {
     inverse(&mut second);
     assert_eq!(first, second, "decorrelation must be per-sample stateless");
 }
+
+// ---------------------------------------------------------------------
+// End-to-end decode-pipeline verification (spec §1).
+//
+// The tests above pin the isolated `inverse` / `forward` functions. The
+// trace-tape tests below prove the *decode pipeline itself* runs exactly
+// that cascade: they parse every per-sample DECORR_PRE / DECORR_POST /
+// PCM_OUT event from a real codec-produced multichannel stream and
+// assert (a) `inverse(raw_per_channel) == decorrelated_per_channel` for
+// every sample slot, and (b) `final_per_channel == decorrelated_per_
+// channel` (spec §1: PCM_OUT equals DECORR_POST for N>1). Because the
+// raw values are produced by the full Rice + Stage-A + Stage-B pipeline
+// on pseudo-noise content, they span the sign/parity matrix the §7.1
+// stereo table samples — now exercised at N=3 and N=6.
+// ---------------------------------------------------------------------
+
+/// Parse `key=v0,v1,...` array field out of one trace line; returns the
+/// signed values for the requested key, or `None` if absent.
+#[cfg(feature = "trace")]
+fn parse_arr(line: &str, key: &str) -> Option<Vec<i32>> {
+    for field in line.split('\t') {
+        if let Some(rest) = field.strip_prefix(key) {
+            if let Some(vals) = rest.strip_prefix('=') {
+                return Some(vals.split(',').map(|v| v.parse::<i32>().unwrap()).collect());
+            }
+        }
+    }
+    None
+}
+
+/// Drive a multichannel pseudo-noise stream through encode -> decode
+/// with the trace tape on, then verify that every DECORR_PRE ->
+/// DECORR_POST transition the live decoder emitted is reproduced by
+/// `inverse`, and that PCM_OUT equals DECORR_POST (spec §1).
+#[cfg(feature = "trace")]
+fn assert_pipeline_decorr_matches_inverse(nch: u16, n_per_ch: usize, tag: &str) {
+    use crate::{decode, encode};
+
+    let tmp = std::env::temp_dir().join(format!("oxideav-tta-decorr-{tag}.tsv"));
+    if tmp.exists() {
+        std::fs::remove_file(&tmp).unwrap();
+    }
+    crate::trace::set_thread_trace_path(Some(tmp.clone()));
+
+    // Pseudo-noise content per channel (uncorrelated draws) so the
+    // per-sample raw buffer hits the full sign/parity matrix, like the
+    // §7.1 noise tape but at this channel count.
+    let mut state: u64 = 0xD1B5_4A32_D192_ED03 ^ (nch as u64);
+    let total = n_per_ch * nch as usize;
+    let samples: Vec<i32> = (0..total)
+        .map(|_| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((state >> 33) as i32 & 0x3FFF) - 0x2000
+        })
+        .collect();
+
+    let tta = encode(&samples, nch, 16, 44_100).expect("encode");
+    let (_info, decoded) = decode(&tta).expect("decode");
+    crate::trace::set_thread_trace_path(None);
+    assert_eq!(decoded, samples, "lossless roundtrip must hold for {tag}");
+
+    let tape = std::fs::read_to_string(&tmp).expect("tape written");
+    let mut pre_count = 0usize;
+    let mut last_pre: Option<Vec<i32>> = None;
+    for line in tape.lines() {
+        if line.starts_with("ev=DECORR_PRE\t") {
+            last_pre = parse_arr(line, "raw_per_channel");
+            assert_eq!(
+                last_pre.as_ref().unwrap().len(),
+                nch as usize,
+                "DECORR_PRE arity must equal nch"
+            );
+        } else if line.starts_with("ev=DECORR_POST\t") {
+            let raw = last_pre
+                .take()
+                .expect("DECORR_POST without a preceding DECORR_PRE");
+            let post = parse_arr(line, "decorrelated_per_channel").unwrap();
+            let mut buf = raw.clone();
+            inverse(&mut buf);
+            assert_eq!(
+                buf, post,
+                "pipeline DECORR_POST must equal inverse(raw) at {tag}; raw={raw:?}"
+            );
+            pre_count += 1;
+        }
+    }
+    assert_eq!(
+        pre_count, n_per_ch,
+        "one DECORR pair per PCM sample slot for {tag}"
+    );
+
+    // Spec §1: PCM_OUT.final_per_channel == DECORR_POST for N>1. Pair the
+    // two event streams by sample_idx order (both are per-sample).
+    let posts: Vec<Vec<i32>> = tape
+        .lines()
+        .filter(|l| l.starts_with("ev=DECORR_POST\t"))
+        .map(|l| parse_arr(l, "decorrelated_per_channel").unwrap())
+        .collect();
+    let pcm_outs: Vec<Vec<i32>> = tape
+        .lines()
+        .filter(|l| l.starts_with("ev=PCM_OUT\t"))
+        .map(|l| parse_arr(l, "final_per_channel").unwrap())
+        .collect();
+    assert_eq!(pcm_outs.len(), n_per_ch, "one PCM_OUT per sample slot");
+    assert_eq!(
+        posts, pcm_outs,
+        "spec §1: PCM_OUT must equal DECORR_POST for N>1 at {tag}"
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// End-to-end: the stereo decode pipeline's per-sample cascade matches
+/// `inverse` on real codec-produced data.
+#[cfg(feature = "trace")]
+#[test]
+fn pipeline_decorr_matches_inverse_stereo() {
+    assert_pipeline_decorr_matches_inverse(2, 300, "stereo");
+}
+
+/// End-to-end: the odd-N (N=3) decode pipeline's per-sample cascade
+/// matches `inverse` — pinning that the §4.3 "no parity special case"
+/// holds through the *full* decode path, not just the isolated function.
+#[cfg(feature = "trace")]
+#[test]
+fn pipeline_decorr_matches_inverse_three_channel() {
+    assert_pipeline_decorr_matches_inverse(3, 300, "3ch");
+}
+
+/// End-to-end: the 6-channel (5.1) decode pipeline's per-sample cascade
+/// matches `inverse` over a noise stream spanning the sign/parity
+/// matrix — the corpus's §7.3 N>2 gap, now closed against the live
+/// decoder rather than only algebraic substitution.
+#[cfg(feature = "trace")]
+#[test]
+fn pipeline_decorr_matches_inverse_six_channel() {
+    assert_pipeline_decorr_matches_inverse(6, 300, "6ch");
+}
