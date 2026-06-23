@@ -6,6 +6,25 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Round-362 (fuzz coverage): the `encode_roundtrip` cargo-fuzz target
+  now drives the encoder/decoder bit-exact roundtrip across the **full
+  `16..=24` `bits_per_sample` range** (`spec/01` §3.2) instead of only
+  the byte-aligned `{16, 24}`. The non-multiple-of-8 widths `17..=23`
+  share `byte_depth == 3` and the LMS `shift = 10` row with 24-bit; the
+  whole pipeline (LMS / Stage-B / Rice / decorrelation) is
+  `byte_depth`-keyed, so every i32 inside the `byte_depth`-wide signed
+  storage range round-trips regardless of the declared
+  `bits_per_sample`. The fuzz input now derives samples per
+  `byte_depth` and selects the depth as `16 + (b1 % 9)`, so the fuzzer
+  exercises the same packing/unpacking and predictor cascade the
+  `17..=23`-bit roundtrip suite pins on hand-picked sines, but across
+  the whole `(channels × bps × sample_rate × format × samples)` cube.
+  The target compares raw `i32` slots, not packed bytes, so the
+  `pack_pcm` convenience packer's `16/24`-only restriction (the source
+  of the prior limitation) does not apply.
+
 ### Fixed
 
 - Round-327: the encoder's adaptive-Rice tracker now clamps its three

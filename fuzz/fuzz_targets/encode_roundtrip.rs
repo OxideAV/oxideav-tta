@@ -30,8 +30,10 @@
 //!
 //! ```text
 //!   byte 0      : channels seed       → channels = (b0 % 6) + 1, in 1..=6
-//!   byte 1      : bit-depth selector  → 0/1/2 → bps ∈ {16, 24} (only the
-//!                 two depths the encoder's `pack_pcm` symmetric uses cover)
+//!   byte 1      : bit-depth selector  → bps ∈ 16..=24 (every in-scope
+//!                 width per `spec/01` §3.2, including the
+//!                 non-multiple-of-8 widths 17..=23 that share
+//!                 `byte_depth == 3` with 24-bit)
 //!   bytes 2-5   : sample_rate seed    → LE u32, masked to 0x007F_FFFF
 //!                                       and OR'd with 1 (rate must be ≥ 1)
 //!   byte 6      : format selector     → 0 → format=1, 1 → format=2
@@ -88,19 +90,21 @@ fuzz_target!(|data: &[u8]| {
     // ── Header byte 0: channels (1..=6) ────────────────────────────
     let channels = ((data[0] as u16) % 6) + 1;
 
-    // ── Header byte 1: bits_per_sample ∈ {16, 24} ──────────────────
-    // Only the two depths `pack_pcm` covers are exercised. Other values
-    // in 17..=23 are valid per the encoder's `16..=24` accepting range
-    // but `pack_pcm` itself panics on them — the bit-exact roundtrip
-    // assertion below compares raw `i32` slots, not packed bytes, so
-    // arbitrary bps in 16..=24 would be admissible — but the encoder's
-    // frame-byte budget grows linearly in bps and the decoder rounds
-    // sample masks to `1 << bits_per_sample`, so sticking to {16, 24}
-    // is the cleanest invariant.
-    let bits_per_sample: u16 = match data[1] % 2 {
-        0 => 16,
-        _ => 24,
-    };
+    // ── Header byte 1: bits_per_sample ∈ 16..=24 ───────────────────
+    // Every in-scope width per `spec/01` §3.2 is exercised, not just
+    // the byte-aligned {16, 24}. The bit-exact roundtrip assertion
+    // below compares raw `i32` slots (not packed bytes), and the
+    // encoder/decoder pipeline is byte_depth-keyed — every i32 inside
+    // the `byte_depth`-wide signed storage range round-trips
+    // regardless of the declared `bits_per_sample`. Deriving the
+    // input samples from `byte_depth`-wide sign-extended payload bytes
+    // (below) keeps them inside that range for all of 16..=24, so the
+    // non-multiple-of-8 widths 17..=23 — which share `byte_depth == 3`
+    // and the LMS `shift = 10` row with 24-bit — are fuzzed on equal
+    // footing with the byte-aligned depths. `pack_pcm` (the public
+    // byte-packer convenience) is *not* used here; the comparison is
+    // at the i32 level, so its 16/24-only restriction does not apply.
+    let bits_per_sample: u16 = 16 + (data[1] % 9) as u16; // 16..=24
 
     // ── Header bytes 2-5: sample_rate (1..=0x007F_FFFF) ────────────
     // Mask to the 23-bit policy ceiling (`spec/01` §3.3 high bit
@@ -129,10 +133,14 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // ── Build the interleaved i32 sample buffer ────────────────────
-    // The encoder's bit-exact contract requires the input sample range
-    // to fit the declared bit depth's signed range: 16-bit -> i16,
-    // 24-bit -> [-2^23, 2^23). Sign-extending from `bps`-bit
-    // little-endian payload bytes gives exactly that.
+    // The encoder's bit-exact contract requires each input sample to
+    // fit the `byte_depth`-wide signed storage range: `byte_depth == 2`
+    // (16-bit) -> i16, `byte_depth == 3` (17..=24-bit) -> [-2^23, 2^23).
+    // Sign-extending from `byte_depth`-wide little-endian payload bytes
+    // gives exactly that, so every declared `bits_per_sample` in
+    // 16..=24 produces an in-range, faithfully round-trippable sample
+    // buffer (the codec never clamps; an in-range input is the
+    // meaningful target).
     let bytes_per_sample = (bits_per_sample as usize).div_ceil(8); // 2 or 3
     let nch = channels as usize;
     let raw_available = payload.len() / bytes_per_sample;
