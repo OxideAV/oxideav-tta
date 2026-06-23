@@ -106,6 +106,25 @@ cargo-fuzz = true
 #   Asserts the AudioFrame packed-plane length equals
 #   `samples * channels * bytes_per_sample` for the configured output
 #   format so the packer can neither drop nor duplicate a sample.
+# - **`corrupt_decode`** (round 362): panic-free decode of a *valid
+#   encoder-produced* stream that has been byte-corrupted **past its
+#   22-byte header**. The `decode` / `streaming_decode` / `demuxer`
+#   targets feed raw fuzz bytes into `Decoder::new`, but the header
+#   CRC32 (`spec/01` §3.5) rejects essentially every mutated input
+#   before a frame body is read — so those targets rarely reach the
+#   seek-table walk, the per-frame trailing-CRC check (`spec/01` §4.3 /
+#   §5), the adaptive Rice decoder (`spec/05`), the Stage-A/B
+#   predictors (`spec/02`/`spec/03`), or the inverse decorrelation
+#   cascade (`spec/04`). This target synthesises a structurally valid
+#   stream via the encoder (consistent header/seek-table/per-frame
+#   CRCs), XOR-mutates the region at/after offset 22 from a fuzz-driven
+#   `(offset, mask)` script, and drives `decode` + the
+#   `Decoder::new`/`decode_all`/`frame_iter`/`decode_frame_at`/
+#   `seek_to_sample` streaming surface + `scan_trailers` over it. The
+#   header still parses, so the mutations land on exactly the deep
+#   decode machinery; the only contract is panic-freedom (a corrupted
+#   stream is *expected* to reject with `Crc32Mismatch { region }` /
+#   `Truncated`).
 [dependencies]
 libfuzzer-sys = "0.4"
 
@@ -188,5 +207,11 @@ doc = false
 [[bin]]
 name = "registry_decode"
 path = "fuzz_targets/registry_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "corrupt_decode"
+path = "fuzz_targets/corrupt_decode.rs"
 test = false
 doc = false

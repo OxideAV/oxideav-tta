@@ -6,6 +6,28 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Round-362 (fuzz coverage): a new `corrupt_decode` cargo-fuzz target
+  that drives **valid encoder-produced streams that have been
+  byte-corrupted past their 22-byte header** through every public
+  decode entry point (`decode`, the `Decoder::new` /
+  `decode_all` / `frame_iter` / `decode_frame_at` / `seek_to_sample`
+  streaming surface, and `scan_trailers`), asserting panic-freedom.
+  The existing `decode` / `streaming_decode` / `demuxer` targets feed
+  raw fuzz bytes into `Decoder::new`, but the header CRC32 (`spec/01`
+  §3.5) rejects essentially every mutated input before a frame body is
+  read — so they rarely reach the seek-table walk, the per-frame
+  trailing-CRC check (`spec/01` §4.3 / §5), the adaptive Rice decoder
+  (`spec/05`), the Stage-A/B predictors (`spec/02`/`spec/03`), or the
+  inverse decorrelation cascade (`spec/04`). The new target synthesises
+  a structurally valid stream via the in-crate encoder (consistent
+  header / seek-table / per-frame CRCs), then XOR-mutates the region at
+  or after offset 22 from a fuzz-driven `(offset, mask)` script, so the
+  header still parses and the mutations land squarely on the deep
+  decode machinery. Seeded with three corpus inputs. Smoke-verified
+  panic-free across 200 000 pseudo-random inputs before landing.
+
 ### Changed
 
 - Round-362 (fuzz coverage): the `encode_roundtrip` cargo-fuzz target

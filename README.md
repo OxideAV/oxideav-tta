@@ -161,7 +161,16 @@ ranges, password streaming, trailer scanning, the framework
 `first_decoder` → `send_packet`/`receive_frame`/`flush`, asserting the
 `AudioFrame` packed-plane length equals `samples * channels *
 bytes_per_sample`), and differential checks of the typed header and
-trailer accessors. The contract is panic-freedom on arbitrary input.
+trailer accessors. `encode_roundtrip` drives the bit-exact roundtrip
+across the full `16..=24` bit-depth range (every in-scope width,
+including the non-multiple-of-8 `17..=23`). `corrupt_decode` reaches
+the *deep* decode machinery the header-CRC gate otherwise hides: it
+synthesises a valid encoder-produced stream, then byte-corrupts the
+region past the 22-byte header (seek table, frame bodies, per-frame
+trailers) so the decoder's seek-table walk, per-frame CRC check, Rice
+decoder, LMS / Stage-B predictors, and inverse decorrelation are all
+exercised on inputs that parse past the header. The contract is
+panic-freedom on arbitrary input.
 
 ```sh
 cargo +nightly fuzz run decode -- -max_total_time=60
