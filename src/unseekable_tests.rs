@@ -16,7 +16,7 @@
 
 #![cfg(test)]
 
-use crate::{encode, Decoder, Error};
+use crate::{decode, decode_with_password, encode, encode_with_password, Decoder, Error};
 
 /// Build a deterministic multi-frame stereo 16-bit stream and return
 /// `(bytes, regular_frame_samples, frame_count, total_samples)`.
@@ -218,4 +218,68 @@ fn seekable_stream_still_seeks_normally() {
     let nch = 2usize;
     let from = dec.decode_from_sample(10).expect("from-sample");
     assert_eq!(from, pcm[10 * nch..]);
+}
+
+#[test]
+fn eager_public_decode_entry_point_decodes_unseekable_stream() {
+    // The eager `decode()` entry point is linear, so a corrupt
+    // seek-table CRC must not stop it — it returns the full PCM.
+    let (pcm, mut bytes, _regular, frame_count, _total) = make_multi_frame_stream();
+    corrupt_seek_table_crc(&mut bytes, frame_count);
+    let (info, decoded) = decode(&bytes).expect("eager decode must continue in unseekable mode");
+    assert_eq!(info.total_samples as usize, pcm.len() / 2);
+    assert_eq!(
+        decoded, pcm,
+        "eager decode of an unseekable stream is bit-exact"
+    );
+}
+
+#[test]
+fn format2_stream_obeys_unseekable_discipline() {
+    // A corrupt seek-table CRC on a format=2 (password-primed) stream
+    // must (a) still decode linearly with the right password through the
+    // eager + streaming entry points, and (b) refuse random-access
+    // seeks. The password path shares the seek-table machinery, so the
+    // §4.3 discipline must hold there too.
+    let sample_rate: u32 = 8_000;
+    let regular = ((sample_rate as u64) * 256 / 245) as u32;
+    let total = regular * 2 + 333; // 3 frames
+    let nch = 2usize;
+    let mut pcm = vec![0i32; total as usize * nch];
+    let mut x: u32 = 0xCAFE_1234;
+    for v in pcm.iter_mut() {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        *v = ((x & 0x0FFF) as i32) - 0x0800;
+    }
+    let password = b"hunter2";
+    let mut bytes = encode_with_password(&pcm, 2, 16, sample_rate, password).expect("encode f2");
+    let frame_count = total.div_ceil(regular);
+
+    // Pristine format=2 stream is seekable and decodes with the password.
+    let (_info, pristine) = decode_with_password(&bytes, password).expect("pristine f2 decode");
+    assert_eq!(pristine, pcm);
+
+    // Corrupt the seek-table CRC.
+    corrupt_seek_table_crc(&mut bytes, frame_count);
+
+    // Eager password decode still succeeds (linear).
+    let (_info2, linear) =
+        decode_with_password(&bytes, password).expect("f2 unseekable linear decode");
+    assert_eq!(
+        linear, pcm,
+        "format=2 unseekable linear decode is bit-exact"
+    );
+
+    // The streaming decoder reports unseekable and refuses seeks, but
+    // its linear frame_iter still reproduces the PCM with the password.
+    let dec = Decoder::new_with_password(&bytes, password).expect("f2 streaming open");
+    assert!(!dec.is_seekable());
+    assert_eq!(dec.seek_to_sample(0), Err(Error::SeekTableUnreliable));
+    let mut streamed = Vec::new();
+    for f in dec.frame_iter() {
+        streamed.extend_from_slice(&f.expect("f2 frame_iter in unseekable mode"));
+    }
+    assert_eq!(streamed, pcm, "format=2 unseekable frame_iter is bit-exact");
 }

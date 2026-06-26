@@ -33,6 +33,16 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exception; and a regression guard that the gate does not break a
   pristine stream's seeks.
 
+- Round-374 (unseekable-mode coverage, public + format=2 paths): three
+  more `src/unseekable_tests.rs` tests extend the §4.3 discipline to the
+  one-shot public surface. The eager `decode()` entry point continues to
+  return the full bit-exact PCM for a corrupt-seek-table stream (it is
+  linear). A format=2 (password-primed) stream with a corrupt seek-table
+  CRC still decodes bit-exactly through `decode_with_password()` and the
+  `Decoder::new_with_password` + `frame_iter` streaming path, while
+  `seek_to_sample` refuses with `Error::SeekTableUnreliable` — pinning
+  that the password machinery shares the seek-table discipline.
+
 - Round-374 (empty-stream conformance, `spec/01` §4.4): a new
   `empty_stream_round_trips_and_is_valid` test pins the
   `total_samples == 0` path across `{1, 2, 6}` channels × `{16, 24}`
