@@ -44,6 +44,16 @@ pub enum Error {
     /// [`crate::Decoder::seek_to_sample`] was at or above the
     /// stream's `total_samples`.
     SampleIndexOutOfRange,
+    /// A random-access seek was requested on a stream whose seek-table
+    /// CRC32 (`spec/01` §4.3) did not validate. Per spec §4.3, "It is
+    /// possible to decode a TTA file with a corrupted seek table, but
+    /// in 'unseekable' mode only": the byte offsets in the table cannot
+    /// be trusted to point at frame boundaries, so random-access seeks
+    /// are refused with this recoverable error while linear decode
+    /// ([`crate::Decoder::decode_all`] / [`crate::Decoder::frame_iter`])
+    /// continues. Callers can test [`crate::Decoder::is_seekable`]
+    /// before issuing a seek to avoid the error.
+    SeekTableUnreliable,
     /// A seek-table entry / [`crate::FrameDescriptor`] carried a
     /// `disk_size` smaller than 4 bytes, leaving no room for the
     /// trailing per-frame CRC32 required by `spec/01` §5.1 (each
@@ -130,6 +140,9 @@ impl core::fmt::Display for Error {
             Error::SampleIndexOutOfRange => {
                 f.write_str("oxideav-tta: sample index at or above total_samples")
             }
+            Error::SeekTableUnreliable => f.write_str(
+                "oxideav-tta: seek-table CRC32 failed; stream is decodable in linear mode only",
+            ),
             Error::InvalidFrameByteLength(v) => {
                 write!(
                     f,

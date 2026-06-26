@@ -8,6 +8,31 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round-374 (unseekable-mode discipline, `spec/01` §4.3): the decoder
+  now honours the spec's "decodable in unseekable mode only" contract
+  for streams whose **seek-table CRC32 fails**. `parse_seek_table`
+  already recorded `crc_ok` without aborting, but the random-access
+  surface trusted the (now-untrustworthy) byte offsets unconditionally.
+  Added a new public `Decoder::is_seekable()` accessor (returns the
+  seek-table-CRC-validated flag) and a new recoverable
+  `Error::SeekTableUnreliable` variant. When the seek-table CRC failed,
+  the random-access entry points — `seek_to_sample`, `seek_to_time`,
+  and every wrapper built on them (`frame_iter_from_sample`,
+  `decode_from_sample`, `frame_iter_from_time`, `decode_from_time`,
+  `decode_sample_range`, `frame_iter_sample_range`, `decode_time_range`,
+  `frame_iter_time_range`) — refuse with `Error::SeekTableUnreliable`,
+  taking precedence over the range check. Linear decode (`decode_all`,
+  `frame_iter`) and explicit-index access (`decode_frame_at`,
+  `frame_iter_from`) continue unaffected, mirroring the spec §4.3
+  guidance that a damaged seek table still permits a sequential decode.
+  A zero-width `[start, start)` range remains `Ok(vec![])` regardless of
+  seekability (it issues no seek and touches no bytes). Five new tests
+  in `src/unseekable_tests.rs` pin: corrupt-table → unseekable +
+  bit-exact linear decode/`frame_iter`; every random-access method
+  refusing; explicit-index access still bit-exact; the empty-range
+  exception; and a regression guard that the gate does not break a
+  pristine stream's seeks.
+
 - Round-362 (fuzz coverage): a new `corrupt_decode` cargo-fuzz target
   that drives **valid encoder-produced streams that have been
   byte-corrupted past their 22-byte header** through every public

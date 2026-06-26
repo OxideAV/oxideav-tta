@@ -250,5 +250,8 @@ mod decorr_conformance_tests;
 #[cfg(test)]
 mod roundtrip_tests;
 
+#[cfg(test)]
+mod unseekable_tests;
+
 #[cfg(all(test, feature = "registry"))]
 mod seek_tests;

@@ -485,6 +485,30 @@ impl<'a> Decoder<'a> {
         self.header.total_samples
     }
 
+    /// Whether random-access seeks are permitted on this stream.
+    ///
+    /// Returns `true` when the seek-table CRC32 (`spec/01` §4.3)
+    /// validated at parse time; `false` when it did not. Per spec §4.3
+    /// ("It is possible to decode a TTA file with a corrupted seek
+    /// table, but in 'unseekable' mode only"), a stream whose seek
+    /// table failed its CRC is still decodable **linearly** — the
+    /// frame-by-frame walk does not depend on the table being
+    /// trustworthy for arbitrary jumps — but the byte offsets cannot
+    /// be relied on to land on a frame boundary, so the random-access
+    /// surface ([`Self::seek_to_sample`], [`Self::seek_to_time`], and
+    /// the sample/time-range and from-sample/from-time wrappers built
+    /// on them) refuse with [`Error::SeekTableUnreliable`].
+    ///
+    /// Linear decode ([`Self::decode_all`], [`Self::frame_iter`]) and
+    /// explicit-index frame access ([`Self::decode_frame_at`],
+    /// [`Self::frame_iter_from`]) remain available regardless: those
+    /// walk the table in stored order rather than jumping to a
+    /// computed offset, matching libtta's unseekable-mode behaviour
+    /// of continuing the linear decode.
+    pub fn is_seekable(&self) -> bool {
+        self.seek_table_crc_ok
+    }
+
     /// Locate the frame containing the per-channel `sample_index`
     /// (zero-based) and the sample's offset within that frame.
     ///
@@ -500,6 +524,13 @@ impl<'a> Decoder<'a> {
     /// skip `sample_offset_in_frame * header.channels` interleaved
     /// PCM entries.
     pub fn seek_to_sample(&self, sample_index: u64) -> Result<SeekPoint> {
+        if !self.seek_table_crc_ok {
+            // Unseekable mode (spec/01 §4.3): the seek-table CRC failed,
+            // so the byte offsets cannot be trusted to land on frame
+            // boundaries. Refuse the random-access seek; linear decode
+            // remains available via `decode_all` / `frame_iter`.
+            return Err(Error::SeekTableUnreliable);
+        }
         if sample_index >= self.header.total_samples as u64 {
             return Err(Error::SampleIndexOutOfRange);
         }
