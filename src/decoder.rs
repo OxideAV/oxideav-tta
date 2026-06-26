@@ -503,8 +503,9 @@ impl<'a> Decoder<'a> {
     /// explicit-index frame access ([`Self::decode_frame_at`],
     /// [`Self::frame_iter_from`]) remain available regardless: those
     /// walk the table in stored order rather than jumping to a
-    /// computed offset, matching libtta's unseekable-mode behaviour
-    /// of continuing the linear decode.
+    /// computed offset, matching the `spec/01` §4.3 guidance that a
+    /// stream with a damaged seek table stays decodable in linear
+    /// ("unseekable") mode.
     pub fn is_seekable(&self) -> bool {
         self.seek_table_crc_ok
     }

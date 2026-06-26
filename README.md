@@ -22,6 +22,15 @@ bit-exactly through the decoder.
   up by `oxideav-meta::register_all`. The demuxer parses the seek table
   at open, emits one self-contained packet per audio frame, and offers
   O(1) `seek_to(pts)`.
+* **Unseekable-mode discipline** (`spec/01` §4.3) — when a stream's
+  seek-table CRC32 fails to validate, the byte offsets can no longer be
+  trusted to land on frame boundaries, so the random-access surface
+  (`seek_to_sample` / `seek_to_time` and every range / from-sample /
+  from-time wrapper, plus the registry `Demuxer::seek_to`) refuses with
+  the recoverable `Error::SeekTableUnreliable`, while linear decode
+  (`decode` / `decode_all` / `frame_iter`) and explicit-index access
+  (`decode_frame_at` / `frame_iter_from`) continue unaffected. Query
+  `Decoder::is_seekable()` before issuing a seek to avoid the error.
 * **Streaming + random-access decode API** on `Decoder`:
   * Lazy iteration: `frame_iter`, `frame_iter_from(index)`.
   * Random access: `decode_frame_at(index)`, `seek_to_sample(sample)`.

@@ -150,9 +150,10 @@ fn random_access_seeks_refuse_in_unseekable_mode() {
 fn explicit_index_access_works_in_unseekable_mode() {
     // `decode_frame_at` and `frame_iter_from` walk the table in stored
     // order rather than jumping to a computed offset, so they remain
-    // available in unseekable mode (they mirror libtta continuing the
-    // linear decode). They must reproduce the same per-frame PCM the
-    // pristine stream yields.
+    // available in unseekable mode (they realise the `spec/01` §4.3
+    // guidance that a damaged seek table still permits a linear
+    // decode). They must reproduce the same per-frame PCM the pristine
+    // stream yields.
     let (_pcm, mut bytes, _regular, frame_count, _total) = make_multi_frame_stream();
 
     let pristine = Decoder::new(&bytes).expect("pristine");
