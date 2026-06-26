@@ -507,6 +507,7 @@ fn open_demuxer(
         current_frame: 0,
         next_pts: 0,
         duration_micros,
+        seekable: seek_table.crc_ok,
     }))
 }
 
@@ -533,6 +534,12 @@ struct TtaDemuxer {
     /// `N * regular_samples`. Reset by `seek_to`.
     next_pts: i64,
     duration_micros: i64,
+    /// Whether the seek-table CRC32 validated at open time (`spec/01`
+    /// §4.3). When `false` the stream is in "unseekable mode": the
+    /// byte offsets cannot be trusted for random access, so `seek_to`
+    /// refuses while `next_packet` (linear) continues. Mirrors the
+    /// `Decoder::is_seekable` discipline on the codec side.
+    seekable: bool,
 }
 
 impl TtaDemuxer {
@@ -626,6 +633,15 @@ impl Demuxer for TtaDemuxer {
             return Err(CoreError::invalid(format!(
                 "oxideav-tta: stream index {stream_index} out of range (only stream 0 exists)"
             )));
+        }
+        if !self.seekable {
+            // Unseekable mode (spec/01 §4.3): the seek-table CRC failed
+            // at open time, so the byte offsets cannot be trusted for a
+            // random-access jump. Refuse the seek; `next_packet` linear
+            // playback remains available.
+            return Err(CoreError::unsupported(
+                "oxideav-tta: seek-table CRC32 failed; stream is playable in linear mode only",
+            ));
         }
         if self.frames.is_empty() || self.regular_samples == 0 {
             return Err(CoreError::unsupported(
@@ -781,5 +797,71 @@ mod tests {
             }
             other => panic!("expected audio frame, got {other:?}"),
         }
+    }
+
+    /// Multi-frame stereo fixture + its frame count, so unseekable-mode
+    /// tests can corrupt the seek-table CRC at a known offset.
+    fn synth_multi_frame_file() -> (Vec<u8>, u32) {
+        let sample_rate: u32 = 8_000;
+        let regular = ((sample_rate as u64) * 256 / 245) as u32; // 8359
+        let total = regular * 2 + 500; // 3 frames
+        let nch = 2usize;
+        let mut pcm = vec![0i32; total as usize * nch];
+        let mut x: u32 = 0x0BAD_F00D;
+        for v in pcm.iter_mut() {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            *v = ((x & 0x1FFF) as i32) - 0x1000;
+        }
+        let bytes = encode(&pcm, 2, 16, sample_rate).expect("encode");
+        (bytes, total.div_ceil(regular))
+    }
+
+    #[test]
+    fn demuxer_refuses_seek_in_unseekable_mode_but_keeps_streaming() {
+        // Corrupt the seek-table CRC (4 bytes at offset 22 + 4*frames)
+        // so the demuxer opens in unseekable mode (spec/01 §4.3).
+        let (mut bytes, frames) = synth_multi_frame_file();
+        let crc_off = 22 + (frames as usize) * 4;
+        bytes[crc_off] ^= 0x01;
+
+        let cursor: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+        let mut demuxer = open_demuxer(cursor, &NoopResolver).expect("open must still succeed");
+
+        // seek_to refuses with a recoverable error.
+        assert!(
+            demuxer.seek_to(0, 0).is_err(),
+            "seek_to must refuse in unseekable mode"
+        );
+        assert!(
+            demuxer.seek_to(0, 9_000).is_err(),
+            "seek_to must refuse for any target in unseekable mode"
+        );
+
+        // next_packet (linear playback) still drains every frame.
+        let mut packets = 0u32;
+        loop {
+            match demuxer.next_packet() {
+                Ok(_pkt) => packets += 1,
+                Err(CoreError::Eof) => break,
+                Err(e) => panic!("unexpected demuxer error in linear mode: {e:?}"),
+            }
+        }
+        assert_eq!(packets, frames, "linear drain must yield every frame");
+    }
+
+    #[test]
+    fn demuxer_seeks_normally_when_table_is_valid() {
+        // Regression guard: the gate must not break the happy path.
+        let (bytes, frames) = synth_multi_frame_file();
+        assert!(frames >= 2);
+        let cursor: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+        let mut demuxer = open_demuxer(cursor, &NoopResolver).expect("open");
+        let landed = demuxer
+            .seek_to(0, 9_000)
+            .expect("seek must succeed on a valid table");
+        // Frame 1 begins at pts = regular_samples (8359).
+        assert_eq!(landed, 8_359);
     }
 }

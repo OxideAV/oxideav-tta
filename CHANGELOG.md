@@ -33,6 +33,16 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exception; and a regression guard that the gate does not break a
   pristine stream's seeks.
 
+- Round-374 (unseekable-mode discipline, demuxer side): the registry
+  `Demuxer` now carries the same `spec/01` §4.3 contract. `open_demuxer`
+  records the seek-table CRC result on the `TtaDemuxer` (previously
+  dropped), and `seek_to` refuses with a recoverable
+  `CoreError::unsupported` when the table's CRC failed, while
+  `next_packet` linear playback continues to drain every frame. Two new
+  registry tests pin the corrupt-table demuxer refusing `seek_to` while
+  still streaming all frames, and a pristine-table regression guard that
+  `seek_to` still lands on the correct frame boundary.
+
 - Round-362 (fuzz coverage): a new `corrupt_decode` cargo-fuzz target
   that drives **valid encoder-produced streams that have been
   byte-corrupted past their 22-byte header** through every public
