@@ -33,6 +33,16 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exception; and a regression guard that the gate does not break a
   pristine stream's seeks.
 
+- Round-374 (empty-stream conformance, `spec/01` §4.4): a new
+  `empty_stream_round_trips_and_is_valid` test pins the
+  `total_samples == 0` path across `{1, 2, 6}` channels × `{16, 24}`
+  bps. The encoder emits a 26-byte file (22-byte header + the lone
+  4-byte seek-table CRC, zero frame descriptors), the §4.4 CRC of zero
+  entry bytes is `0x00000000`, the decoder round-trips to an empty PCM
+  buffer, and the stream is reported seekable (its zero-byte seek-table
+  CRC validates) but every sample index is out of range and linear
+  iteration yields nothing.
+
 - Round-374 (unseekable-mode discipline, demuxer side): the registry
   `Demuxer` now carries the same `spec/01` §4.3 contract. `open_demuxer`
   records the seek-table CRC result on the `TtaDemuxer` (previously

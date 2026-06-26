@@ -1006,6 +1006,49 @@ fn seek_to_sample_rejects_at_or_past_total_samples() {
     );
 }
 
+/// `spec/01` §4.4: a `total_samples == 0` stream has zero frame
+/// descriptors and a seek table that is just its 4-byte CRC (the CRC of
+/// zero bytes is `0x00000000`). The encoder must produce a structurally
+/// valid such file and the decoder must round-trip it to an empty PCM
+/// buffer without crashing.
+#[test]
+fn empty_stream_round_trips_and_is_valid() {
+    for &channels in &[1u16, 2, 6] {
+        for &bps in &[16u16, 24] {
+            let tta = encode(&[], channels, bps, 44_100).expect("encode empty");
+            // Header (22) + just the seek-table CRC (4) = 26 bytes; no
+            // frame data follows.
+            assert_eq!(
+                tta.len(),
+                26,
+                "empty stream for {channels}ch/{bps}bps must be 26 bytes (22 header + 4 seek CRC)"
+            );
+            let (info, pcm) = decode(&tta).expect("decode empty");
+            assert_eq!(info.total_samples, 0);
+            assert_eq!(info.channels, channels);
+            assert_eq!(info.bits_per_sample, bps);
+            assert!(pcm.is_empty(), "empty stream decodes to no samples");
+
+            // The §4.4 seek-table CRC of zero entry bytes is 0x00000000.
+            let crc = u32::from_le_bytes([tta[22], tta[23], tta[24], tta[25]]);
+            assert_eq!(crc, 0x0000_0000, "CRC of zero seek-table bytes is 0");
+
+            // A zero-frame stream is seekable (its seek-table CRC of zero
+            // bytes validates) but has nothing to seek to: every sample
+            // index is out of range.
+            let dec = crate::Decoder::new(&tta).expect("Decoder::new on empty stream");
+            assert!(dec.is_seekable());
+            assert_eq!(dec.frames.len(), 0);
+            assert_eq!(
+                dec.seek_to_sample(0),
+                Err(crate::Error::SampleIndexOutOfRange)
+            );
+            // Linear iteration yields nothing.
+            assert_eq!(dec.frame_iter().count(), 0);
+        }
+    }
+}
+
 #[test]
 fn frame_iter_streaming_seek_and_resume_bit_exact() {
     // The integration property: seek to sample S, decode the
