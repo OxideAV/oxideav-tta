@@ -6,6 +6,31 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-tta/compare/v0.0.3...v0.0.4) - 2026-06-26
+
+### Other
+
+- tta r374: README documents unseekable-mode; paraphrase prose to cite spec/01 §4.3
+- tta r374: unseekable-mode coverage for public eager + format=2 paths (spec/01 §4.3)
+- tta r374: pin empty-stream (total_samples==0) round-trip conformance (spec/01 §4.4)
+- tta r374: extend unseekable-mode discipline to the registry demuxer (spec/01 §4.3)
+- tta r374: unseekable-mode discipline for corrupt seek-table CRC (spec/01 §4.3)
+- tta r362: corrupt_decode fuzz target for deep post-header decode paths
+- tta r362: fuzz encode_roundtrip across full 16..=24 bps range
+- paraphrase residual external-reference naming in CHANGELOG history
+- prove decode pipeline runs the spec §04 cascade end-to-end
+- pin spec §04 N>2 worked cascade + anti-pattern guards
+- pin spec §04 decorrelation against captured reference-tape ground truth
+- tta r345: README — document full bit-depth/channel matrix + seek-table invariant coverage
+- tta r345: pin encoder seek-table structural invariant (spec/01 §4.2/§4.3)
+- tta r345: bit-depth 17-23 + channel-count 3/4/5 + encoder-seek random-access roundtrips
+- r336 fuzz registry_decode — framework Decoder-trait adapter
+- tta r331: continuous-stream chained Rice-decode test (spec §7.1→§7.3)
+- tta r327: cap encoder Rice k increments at MAX_K + lock-step properties
+- tta r323: Rice §7.3 mid-frame reference-tape tests (steps 2 + 16, first k1 demotion)
+- criterion benchmark for the framework raw-.tta demuxer
+- Rice §7.2/§7.4/§7.5 reference-tape hand-verification tests
+
 ### Added
 
 - Round-374 (unseekable-mode discipline, `spec/01` §4.3): the decoder
