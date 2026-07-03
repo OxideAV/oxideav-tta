@@ -77,6 +77,27 @@ fn build_pcm(n_samples: usize, channels: u16, bits_per_sample: u16) -> Vec<i32> 
     out
 }
 
+/// Like [`build_pcm`] but with the amplitude scaled to the exact bit
+/// depth (`~12.5%` of the signed range), for the packed odd widths
+/// 17..23 whose samples must fit `bits_per_sample` bits — the fixed
+/// `1 << 21` used by the 24-bit cells would overflow a 17-bit stream.
+fn build_pcm_scaled(n_samples: usize, channels: u16, bits_per_sample: u16) -> Vec<i32> {
+    let nch = channels as usize;
+    let mut out = Vec::with_capacity(n_samples * nch);
+    let mut state: u32 = 0xCAFE_F00D;
+    let amp = 1i32 << (bits_per_sample - 4);
+    for s in 0..n_samples {
+        let phase = (s % 256) as i32 - 128;
+        let env = (phase * (amp / 128)) + (phase % 64);
+        for ch in 0..nch {
+            let noise = (xorshift32(&mut state) as i32) >> 24; // -128..127
+            let chan_bias = (ch as i32) * (amp / 16);
+            out.push(env + chan_bias + noise);
+        }
+    }
+    out
+}
+
 fn encode_pcm(samples: &[i32], channels: u16, bits_per_sample: u16, sample_rate: u32) -> Vec<u8> {
     encode(samples, channels, bits_per_sample, sample_rate).expect("encode")
 }
@@ -171,12 +192,47 @@ fn bench_decode_stereo_16bit_44k1_format2_1s(c: &mut Criterion) {
     g.finish();
 }
 
+/// Odd packed width: 17-bit stereo (`byte_depth = 3`, MSB-aligned
+/// packing per `spec/01` §3.2 — same byte footprint as 24-bit but a
+/// 17-bit sample range).
+fn bench_decode_stereo_17bit_44k1_500ms(c: &mut Criterion) {
+    let n = 22_050; // 0.5 s @ 44.1 kHz
+    let pcm = build_pcm_scaled(n, 2, 17);
+    let tta = encode_pcm(&pcm, 2, 17, 44_100);
+    let mut g = c.benchmark_group("decode_stereo_17bit_44k1_500ms");
+    g.throughput(Throughput::Bytes((n * 3 * 2) as u64));
+    g.bench_function(BenchmarkId::from_parameter("stereo/17/44k1/500ms"), |b| {
+        b.iter(|| {
+            let (_info, _samples) = decode(criterion::black_box(&tta)).expect("decode");
+        });
+    });
+    g.finish();
+}
+
+/// Odd channel count x mid packed width: 3-channel 20-bit — the
+/// `spec/04` §4.3 odd-N cascade at a width between the 16/24 anchors.
+fn bench_decode_3ch_20bit_48k_250ms(c: &mut Criterion) {
+    let n = 12_000; // 0.25 s @ 48 kHz
+    let pcm = build_pcm_scaled(n, 3, 20);
+    let tta = encode_pcm(&pcm, 3, 20, 48_000);
+    let mut g = c.benchmark_group("decode_3ch_20bit_48k_250ms");
+    g.throughput(Throughput::Bytes((n * 3 * 3) as u64));
+    g.bench_function(BenchmarkId::from_parameter("3ch/20/48k/250ms"), |b| {
+        b.iter(|| {
+            let (_info, _samples) = decode(criterion::black_box(&tta)).expect("decode");
+        });
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_decode_mono_16bit_44k1_1s,
     bench_decode_stereo_16bit_44k1_1s,
     bench_decode_stereo_24bit_48k_500ms,
     bench_decode_6ch_16bit_48k_250ms,
+    bench_decode_stereo_17bit_44k1_500ms,
+    bench_decode_3ch_20bit_48k_250ms,
     bench_decode_stereo_16bit_44k1_format2_1s,
 );
 criterion_main!(benches);
