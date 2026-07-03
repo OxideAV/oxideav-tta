@@ -186,7 +186,10 @@ fn encode_one_frame(
     qm_priming: Option<&[i32; 8]>,
 ) -> Vec<u8> {
     let samples_per_channel = pcm.len() / nch;
-    let mut writer = BitWriter::new();
+    // Capacity hint: the PCM byte footprint. Lossless residual streams
+    // on real audio land at or below it; pathological noise slightly
+    // above — either way one or zero reallocation.
+    let mut writer = BitWriter::new(pcm.len() * bytes_per_sample + 64);
     let mut chans: Vec<EncoderChannelState> = (0..nch)
         .map(|_| {
             let mut lms = LmsState::frame_init(bytes_per_sample);
@@ -290,6 +293,16 @@ struct EncoderChannelState {
 /// LSB-first bit writer used by the entropy encoder. Mirrors the
 /// reader's bit-order discipline (`crate::bitreader`) so the encoded
 /// bytes are decoded back losslessly.
+///
+/// Round 386 (bench+profile): the flush granularity widened from one
+/// byte to four — `put_bits` maintains the invariant `nbits < 32` on
+/// entry, so any `k <= 32` fits the `u64` cache (`nbits + k < 64`)
+/// and at most one 4-byte little-endian flush re-establishes the
+/// invariant. This replaces the per-byte `while` loop (a `Vec::push`
+/// capacity check + store per byte) with one `extend_from_slice` per
+/// 32 emitted bits. Byte output is identical: LSB-first packing of
+/// the same bit stream, little-endian flush order = cache-low-byte
+/// first, exactly the old per-byte order.
 struct BitWriter {
     bytes: Vec<u8>,
     cache: u64,
@@ -297,45 +310,59 @@ struct BitWriter {
 }
 
 impl BitWriter {
-    fn new() -> Self {
+    /// `capacity_hint` pre-sizes the output vec (the caller knows the
+    /// PCM footprint; TTA residual streams land near it on real
+    /// audio). Purely an allocation hint — no effect on the bytes.
+    fn new(capacity_hint: usize) -> Self {
         Self {
-            bytes: Vec::new(),
+            bytes: Vec::with_capacity(capacity_hint),
             cache: 0,
             nbits: 0,
         }
     }
 
+    #[inline]
     fn put_bits(&mut self, value: u32, k: u32) {
         if k == 0 {
             return;
         }
         debug_assert!(k <= 32);
+        debug_assert!(self.nbits < 32);
         let mask = if k == 32 { u32::MAX } else { (1u32 << k) - 1 };
         let v = (value & mask) as u64;
         self.cache |= v << self.nbits;
         self.nbits += k;
-        while self.nbits >= 8 {
-            self.bytes.push((self.cache & 0xFF) as u8);
-            self.cache >>= 8;
-            self.nbits -= 8;
+        if self.nbits >= 32 {
+            self.bytes
+                .extend_from_slice(&(self.cache as u32).to_le_bytes());
+            self.cache >>= 32;
+            self.nbits -= 32;
         }
     }
 
+    #[inline]
     fn put_unary(&mut self, u: u32) {
+        // `u` ones then the `0` terminator in a single put when they
+        // fit one 32-bit word: LSB-first, `(1 << u) - 1` over width
+        // `u + 1` is exactly that pattern.
+        if u < 32 {
+            self.put_bits((1u32 << u) - 1, u + 1);
+            return;
+        }
         let mut remaining = u;
         while remaining >= 32 {
             self.put_bits(u32::MAX, 32);
             remaining -= 32;
         }
-        if remaining > 0 {
-            self.put_bits((1u32 << remaining) - 1, remaining);
-        }
-        self.put_bits(0, 1);
+        // remaining < 32, so ones + terminator fit one word.
+        self.put_bits((1u32 << remaining) - 1, remaining + 1);
     }
 
     fn finish_byte_aligned(mut self) -> Vec<u8> {
-        if self.nbits > 0 {
+        while self.nbits > 0 {
             self.bytes.push((self.cache & 0xFF) as u8);
+            self.cache >>= 8;
+            self.nbits = self.nbits.saturating_sub(8);
         }
         self.bytes
     }
@@ -439,7 +466,7 @@ mod tests {
             0, 1026, 1038, 1074, 1099, 1086, 1078, 873, -19, 0, 0, -42, 5, -7, 12, -3, 1234, -1234,
             100, -100,
         ];
-        let mut writer = BitWriter::new();
+        let mut writer = BitWriter::new(0);
         let mut state = RiceState::frame_init();
         let mut k_states_after = Vec::new();
         for &e in &residuals {
@@ -464,7 +491,7 @@ mod tests {
     /// ever exceeds [`MAX_K`]. Returns the final tracker state so a
     /// caller can assert how far `k` climbed.
     fn assert_encode_decode_lockstep(residuals: &[i32]) -> RiceState {
-        let mut writer = BitWriter::new();
+        let mut writer = BitWriter::new(0);
         let mut enc_state = RiceState::frame_init();
         let mut per_step = Vec::with_capacity(residuals.len());
         for &e in residuals {
