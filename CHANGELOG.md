@@ -6,7 +6,68 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Round-386 (depth mode: bench + profile). Hot-path performance work
+  with **byte-identical outputs on both sides** — a new wire-level pin
+  suite (`tests/bitexact_pins.rs`) freezes the encoder's on-disk bytes
+  AND the decoder's PCM as FNV-1a-64 digests over a deterministic
+  multi-frame corpus (mono/stereo/3ch/6ch x 16/17/20/24 bps + the
+  format=2 password path), so even a symmetric encoder+decoder
+  lockstep change that still round-trips would fail loudly. On top of
+  that pin:
+  - **CRC32 slice-by-8** — `Crc32::update` folds 8 bytes per iteration
+    through a compile-time 8x256 table set (standard slice-by-8
+    recurrence over the reflected IEEE-802.3 polynomial, `spec/01`
+    §6); per-byte Sarwate remains for `update_byte` and sub-8 tails.
+    New tests pin the bulk path against the per-byte step at every
+    length 0..=64 and every streaming split.
+  - **u64 bulk-refill bit reader** — the decode-side `BitReader` cache
+    widened from `u32`/byte-at-a-time to `u64` with an 8-byte
+    unaligned little-endian refill (duplicate-byte trick), and
+    `read_unary` replaced its per-bit scan with one `trailing_ones`
+    count (the `spec/05` §2.3 0xFF-run fast path falls out at up to
+    63 ones per iteration). The per-frame CRC moved out of the reader
+    to a whole-body one-shot pass — per `spec/01` §5.4 the trailing
+    CRC covers every body byte including the padding tail, so the
+    value is identical.
+  - **4-byte-flush BitWriter** — the encode-side writer flushes 32
+    bits at a time (invariant `nbits < 32` on entry) instead of a
+    per-byte `Vec::push` loop, `put_unary` emits the ones-run and the
+    terminator in a single `put_bits` for `u < 32`, and the frame
+    body vec is pre-sized at the PCM footprint.
+  - Measured on Apple Silicon (interleaved min-of-5 wall clock,
+    `profile_decode`/`profile_encode` drivers, 150 iters/run): decode
+    mono16 **-5.6%**, stereo16 **-16.9%**, stereo24 **-14.0%**, 6ch16
+    **-19.3%**, format2 **-15.8%**; encode mono16 **-7.8%**, stereo16
+    **-11.6%**, stereo24 **-13.5%**, 6ch16 **-20.1%**, format2
+    **-14.3%**.
+  - Experiments measured and **rejected** as noise-level or negative
+    on this host (kept out of the tree): fusing the LMS STEP-1 qm
+    update into the STEP-2 dot product (the `-O3` NEON codegen already
+    emits `mla.4s` for the fused pattern), a stack scratch +
+    `extend_from_slice` decode output path, and a fused
+    unary+tail `read_codeword` primitive.
+
 ### Added
+
+- Round-386: `#[inline]` on the per-sample Rice entry points
+  (`rice::decode_one` / `decode_one_traced`) — invisible under this
+  workspace's thin-LTO/1-CGU release profile but material for
+  default-profile downstream consumers, matching the inline discipline
+  the reader/LMS/Stage-B steps already follow.
+- Round-386: two odd-geometry Criterion cells in both the `decode` and
+  `encode` harnesses — stereo 17-bit (packed `byte_depth = 3` odd
+  width per `spec/01` §3.2) and 3-channel 20-bit (odd-N cascade,
+  `spec/04` §4.1/§4.3) — with a bit-depth-scaled corpus generator so
+  the synthesized samples fit the exact packed width.
+- Round-386: `examples/profile_encode.rs` — encode-side twin of
+  `profile_decode`: sampling-profiler target plus FNV-1a bit-identity
+  oracle over the encoded stream.
+- Round-386: `BENCHMARKS.md` — full six-harness Criterion sweep
+  (decode / encode / roundtrip / streaming / range / demuxer) with
+  per-cell numbers, the r386 optimisation ledger, and the
+  reproduction recipe.
 
 - Round-374 (unseekable-mode discipline, `spec/01` §4.3): the decoder
   now honours the spec's "decodable in unseekable mode only" contract

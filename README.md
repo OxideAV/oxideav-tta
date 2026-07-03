@@ -189,10 +189,15 @@ cargo +nightly fuzz run decode -- -max_total_time=60
 
 Criterion harnesses under `benches/` characterise the decode, encode,
 roundtrip, streaming, range, and framework-demuxer hot paths on a
-deterministic synthetic corpus (mono16 / stereo16 / stereo24 / 6ch16 /
-format=2). The `demuxer` harness covers the registry `Demuxer` open /
-`next_packet`-drain / O(1) `seek_to` paths. Numbers move with host
-hardware; the value is the relative cost across scenarios.
+deterministic synthetic corpus (mono16 / stereo16 / stereo17 /
+stereo24 / 3ch20 / 6ch16 / format=2). The `demuxer` harness covers the
+registry `Demuxer` open / `next_packet`-drain / O(1) `seek_to` paths.
+See [BENCHMARKS.md](BENCHMARKS.md) for the full per-cell sweep, the
+round-386 optimisation ledger (slice-by-8 CRC32, u64 bulk-refill bit
+reader, 4-byte-flush bit writer — decode −6..−19%, encode −8..−20%
+per interleaved A/B, outputs byte-identical under
+`tests/bitexact_pins.rs`), and the reproduction recipe. Numbers move
+with host hardware; the value is the relative cost across scenarios.
 
 ```sh
 cargo bench
