@@ -76,6 +76,7 @@ pub(crate) const MAX_K: u32 = 31;
 /// Decode one Rice value from `reader` and return the signed residual.
 /// Updates `state` in place per spec §5.
 #[allow(dead_code)] // direct callers vanish under `--features trace`.
+#[inline]
 pub fn decode_one(reader: &mut BitReader<'_>, state: &mut RiceState) -> Result<i32> {
     Ok(decode_one_traced(reader, state)?.residual_signed)
 }
@@ -86,6 +87,11 @@ pub fn decode_one(reader: &mut BitReader<'_>, state: &mut RiceState) -> Result<i
 /// high-mode, `k_used` is the `k` applied to the binary tail (= `k0`
 /// for low-mode, `k1` for high-mode), captured **before** any
 /// adaptive update.
+///
+/// `#[inline]` matters beyond this crate's own thin-LTO builds: for a
+/// default-profile downstream consumer (16 codegen units, no LTO) this
+/// per-sample entry point would otherwise sit behind a real call.
+#[inline]
 pub fn decode_one_traced(reader: &mut BitReader<'_>, state: &mut RiceState) -> Result<RiceTrace> {
     let u = reader.read_unary()?;
     let (mode_high, k_for_tail, prefix_value) = if u == 0 {
