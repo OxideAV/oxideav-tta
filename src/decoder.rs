@@ -212,23 +212,17 @@ fn decode_frame_inner(
         out[base..base + nch].copy_from_slice(&scratch);
     }
 
-    // CRC verification — the bit reader has folded every byte the
-    // entropy decoder consumed into its CRC register. Per spec §5.3,
-    // the encoder pads the bit cache up to the next byte boundary
-    // before writing the trailing CRC; therefore the decoder may have
-    // up to 7 unread bits in its cache once `samples_per_frame * nch`
-    // residuals have been produced. The CRC is over BYTES (not bits),
-    // so any body bytes the cache has already drawn from but which the
-    // residual budget did not technically "consume" must still fold
-    // into the CRC register. Walk any remaining body bytes to do so.
-    let consumed = reader.bytes_consumed();
-    let mut crc = reader.crc_state();
-    if consumed < body_len {
-        for &b in &body[consumed..body_len] {
-            crc.update_byte(b);
-        }
-    }
-    let computed_crc = crc.finalize();
+    // CRC verification — per spec §5.4 the trailing CRC covers every
+    // body byte. Per spec §5.3 the encoder pads the bit cache up to
+    // the next byte boundary before writing the trailing CRC, so the
+    // covered region is the full `body` slice regardless of how many
+    // bits the residual budget consumed: bytes the reader drew into
+    // its cache plus any padding tail both fold in. A single one-shot
+    // pass here is byte-for-byte identical to the old scheme (fold
+    // per consumed byte inside the reader, then walk the leftover
+    // tail) while keeping the CRC dependency chain out of the entropy
+    // decoder's per-byte refill path (round-386 profiling).
+    let computed_crc = crate::crc32::crc32(body);
     let crc_ok = computed_crc == stored_crc;
 
     #[cfg(feature = "trace")]
