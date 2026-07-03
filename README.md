@@ -1,5 +1,7 @@
 # oxideav-tta
 
+[![CI](https://github.com/OxideAV/oxideav-tta/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-tta/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-tta.svg)](https://crates.io/crates/oxideav-tta) [![docs.rs](https://docs.rs/oxideav-tta/badge.svg)](https://docs.rs/oxideav-tta) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust True Audio (TTA) lossless audio codec for the
 [oxideav](https://github.com/OxideAV/oxideav-workspace) framework.
 Encoder and decoder, in safe Rust. Encoder output round-trips
