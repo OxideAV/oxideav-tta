@@ -17,6 +17,35 @@ use crate::stage_b::StageBState;
 #[cfg(feature = "trace")]
 use crate::trace::TraceWriter;
 
+/// Clamp a header-derived output-length estimate to a bound the
+/// on-disk bytes can actually produce.
+///
+/// The `decode_all` / range / suffix paths size their output `Vec` from
+/// `total_samples * channels` (or a sub-range of it), a value taken
+/// straight off the CRC-covered stream header. A crafted stream whose
+/// header is internally consistent (matching header CRC + a present,
+/// short seek table reachable via a large `sample_rate`) can advertise a
+/// `total_samples` near `u32::MAX` while carrying almost no frame data,
+/// so that estimate can reach tens of gigabytes. Feeding it to
+/// `Vec::with_capacity` aborts the process on allocation failure — not a
+/// catchable [`Error`] — before the per-frame `Truncated` gate ever
+/// runs.
+///
+/// Every interleaved output entry is exactly one Rice residual, and
+/// every Rice residual occupies at least one bit of a frame body, and
+/// all frame bodies live inside the on-disk slice. So the fully decoded
+/// length can never exceed `8 * on_disk_len` interleaved entries no
+/// matter what the header claims. For any real stream the header
+/// estimate sits far below that ceiling (the compressed body is smaller
+/// than the PCM it expands to), so legitimate decodes keep their exact
+/// preallocation; only an oversized-header forgery is clamped, after
+/// which the frame walk runs off the end of the slice and returns
+/// [`Error::Truncated`].
+#[inline]
+fn bounded_capacity(header_estimate: usize, on_disk_len: usize) -> usize {
+    header_estimate.min(on_disk_len.saturating_mul(8))
+}
+
 /// One per-channel pipeline state bundle.
 struct ChannelState {
     rice: RiceState,
@@ -376,9 +405,10 @@ impl<'a> Decoder<'a> {
         #[cfg(feature = "trace")]
         self.emit_file_level_trace(trace.as_mut());
 
-        let mut out = Vec::with_capacity(
+        let mut out = Vec::with_capacity(bounded_capacity(
             (self.header.total_samples as usize) * (self.header.channels as usize),
-        );
+            self.bytes.len(),
+        ));
         for (i, frame) in self.frames.iter().enumerate() {
             let off = frame.file_offset as usize;
             let end = off + frame.disk_size as usize;
@@ -597,7 +627,7 @@ impl<'a> Decoder<'a> {
         // Suffix length in interleaved entries = (total - sample_index) * channels.
         // The seek_to_sample bound check already guaranteed sample_index < total.
         let suffix_entries = ((total - sample_index) as usize).saturating_mul(channels);
-        let mut out = Vec::with_capacity(suffix_entries);
+        let mut out = Vec::with_capacity(bounded_capacity(suffix_entries, self.bytes.len()));
         for frame in iter {
             out.extend_from_slice(&frame?);
         }
@@ -716,7 +746,7 @@ impl<'a> Decoder<'a> {
         let iter = self.frame_iter_sample_range(start, end)?;
         let channels = self.header.channels as usize;
         let suffix_entries = ((end - start) as usize).saturating_mul(channels);
-        let mut out = Vec::with_capacity(suffix_entries);
+        let mut out = Vec::with_capacity(bounded_capacity(suffix_entries, self.bytes.len()));
         for frame in iter {
             out.extend_from_slice(&frame?);
         }
@@ -1263,6 +1293,42 @@ fn samples_to_duration(samples: u64, sample_rate: u32) -> core::time::Duration {
     // simplification).
     let nanos = ((remainder as u128) * 1_000_000_000u128) / (sample_rate as u128);
     core::time::Duration::new(secs, nanos as u32)
+}
+
+#[cfg(test)]
+mod bounded_capacity_tests {
+    use super::bounded_capacity;
+
+    #[test]
+    fn legit_estimate_below_ceiling_passes_through() {
+        // A real stereo/16 second-long stream: ~88 200 interleaved
+        // entries against a compressed body of ~150 KiB. The header
+        // estimate is far below `8 * on_disk_len`, so it is preserved
+        // exactly — no preallocation regression for real files.
+        assert_eq!(bounded_capacity(88_200, 150_000), 88_200);
+    }
+
+    #[test]
+    fn oversized_estimate_is_clamped_to_on_disk_ceiling() {
+        // The forged-header case: `total_samples * channels` reaches
+        // billions of entries while the whole file is ~2 KiB. The
+        // estimate is clamped to `8 * on_disk_len`, so the eager
+        // reservation stays tiny instead of aborting the process.
+        let huge = u32::MAX as usize; // ~4.29e9
+        assert_eq!(bounded_capacity(huge, 2_000), 16_000);
+    }
+
+    #[test]
+    fn ceiling_arithmetic_never_overflows() {
+        // `8 * on_disk_len` must saturate rather than wrap for an
+        // absurd on-disk length near `usize::MAX`.
+        assert_eq!(bounded_capacity(usize::MAX, usize::MAX), usize::MAX);
+    }
+
+    #[test]
+    fn empty_input_clamps_to_zero() {
+        assert_eq!(bounded_capacity(1_000_000, 0), 0);
+    }
 }
 
 #[cfg(test)]

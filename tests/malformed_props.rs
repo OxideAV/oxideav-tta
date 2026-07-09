@@ -326,6 +326,70 @@ fn oversize_total_samples_is_rejected_without_panic() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// 4b. Fully-synthetic oversized-header stream. Unlike the test above
+//     (which bumps `total_samples` on a real stream by a bounded 50 M,
+//     leaving the seek table describing only the real frames), this
+//     one hand-builds a header + seek table that are *internally
+//     consistent* — matching header CRC, a present CRC-valid seek
+//     table — yet claim `total_samples == u32::MAX`. A ceiling-value
+//     `sample_rate` keeps the regular frame length ~8.76 M samples, so
+//     only a few hundred frames (a ~2 KiB seek table) are needed to
+//     satisfy the geometry, while `total_samples * channels` reaches
+//     ~4.29 billion interleaved entries. A decoder that sizes its
+//     output `Vec` straight off `total_samples` would eagerly reserve
+//     ~17 GiB and abort on allocation failure (an uncatchable process
+//     death, not a typed error). The output preallocation must instead
+//     be bounded by what the on-disk bytes can produce, so the frame
+//     walk reaches the absent frame data and returns `Truncated`.
+// ─────────────────────────────────────────────────────────────────────
+#[test]
+fn oversized_consistent_header_does_not_over_allocate() {
+    let sample_rate: u32 = 0x7F_FFFF; // policy ceiling per spec/01 §3.3
+    let total_samples: u32 = u32::MAX;
+    let channels: u16 = 1;
+
+    // Mirror StreamHeader::frame_geometry (spec/01 §4.1).
+    let regular = ((sample_rate as u64) * 256 / 245) as u32;
+    let raw = total_samples % regular;
+    let frame_count = if raw == 0 {
+        total_samples / regular
+    } else {
+        total_samples / regular + 1
+    } as usize;
+
+    // 22-byte stream header.
+    let mut tta = Vec::new();
+    tta.extend_from_slice(b"TTA1");
+    tta.extend_from_slice(&1u16.to_le_bytes()); // format = 1
+    tta.extend_from_slice(&channels.to_le_bytes());
+    tta.extend_from_slice(&16u16.to_le_bytes()); // bits_per_sample
+    tta.extend_from_slice(&sample_rate.to_le_bytes());
+    tta.extend_from_slice(&total_samples.to_le_bytes());
+    let hdr_crc = ieee_crc32(&tta[..18]);
+    tta.extend_from_slice(&hdr_crc.to_le_bytes());
+
+    // Seek table: `frame_count` u32 disk sizes, then a CRC over the
+    // entries. Each frame claims a nonzero body so the frame walk
+    // immediately addresses bytes past the (absent) frame region.
+    let entries_start = tta.len();
+    for _ in 0..frame_count {
+        tta.extend_from_slice(&16u32.to_le_bytes());
+    }
+    let st_crc = ieee_crc32(&tta[entries_start..]);
+    tta.extend_from_slice(&st_crc.to_le_bytes());
+    // No frame data follows.
+
+    // If this over-allocated, the process would abort before returning;
+    // reaching the assertion at all already proves the preallocation is
+    // bounded. The typed error is `Truncated` (frame bytes absent).
+    let r = decode(&tta);
+    assert!(
+        matches!(r, Err(Error::Truncated)),
+        "oversized consistent header must surface Truncated, got {r:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // 5. Wrong-password format=2: never panic; if `Ok`, the PCM length is
 //    correct (sample-count and channel-count match the header).
 // ─────────────────────────────────────────────────────────────────────
