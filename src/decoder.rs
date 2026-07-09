@@ -103,6 +103,25 @@ fn decode_frame_inner(
     let nch = header.channels as usize;
     let bytes_per_sample = header.bytes_per_sample();
     let samples_per_frame = descriptor.sample_count as usize;
+
+    // A body of `body_len` bytes carries `8 * body_len` bits, and every
+    // interleaved residual (one Rice codeword per sample × channel)
+    // consumes at least one bit — its unary terminator — so a frame
+    // whose declared `samples_per_frame * nch` exceeds `8 * body_len`
+    // cannot possibly be valid. `sample_count` comes from the header's
+    // §4.1 geometry, not from the body, so a ceiling-value `sample_rate`
+    // drives `samples_per_frame` toward ~8.76 M while the on-disk body
+    // stays tiny: without this gate the positional output buffer below
+    // (`vec![0i32; …]`, zero-filled, so every page is committed) would
+    // reserve hundreds of megabytes of real RAM before the decode loop
+    // hits the first end-of-stream error and unwinds. Reject the
+    // structurally-impossible frame up front; a valid frame always
+    // satisfies the bound (equality only in the all-zero-residual,
+    // `k == 0` limit), so this never rejects real data.
+    if samples_per_frame.saturating_mul(nch) > body_len.saturating_mul(8) {
+        return Err(Error::Truncated);
+    }
+
     let mut out = vec![0i32; samples_per_frame * nch];
 
     let mut reader = BitReader::new(body);

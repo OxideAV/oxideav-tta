@@ -390,6 +390,56 @@ fn oversized_consistent_header_does_not_over_allocate() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// 4c. Single frame with a huge geometry-derived `sample_count` but a
+//     tiny on-disk body. `sample_count` is derived from the header's
+//     §4.1 geometry (`floor(sample_rate * 256 / 245)`), not from the
+//     body, so a ceiling-value `sample_rate` yields ~8.76 M
+//     samples/frame. At 6 channels that is ~52 M interleaved residuals;
+//     the per-frame output `Vec` is zero-filled (real RAM commit), so a
+//     ~50-byte file would otherwise force a ~210 MiB commit before the
+//     decode loop hits end-of-stream and unwinds. A body of `L` bytes
+//     holds `8L` bits and each residual costs at least one bit, so the
+//     decoder must reject the structurally-impossible frame up front.
+// ─────────────────────────────────────────────────────────────────────
+#[test]
+fn tiny_body_huge_sample_count_frame_rejected_before_alloc() {
+    let sample_rate: u32 = 0x7F_FFFF; // policy ceiling
+    let channels: u16 = 6;
+    let regular = ((sample_rate as u64) * 256 / 245) as u32;
+    // total_samples == regular → exactly one (regular-length) frame.
+    let total_samples: u32 = regular;
+
+    let mut tta = Vec::new();
+    tta.extend_from_slice(b"TTA1");
+    tta.extend_from_slice(&1u16.to_le_bytes()); // format = 1
+    tta.extend_from_slice(&channels.to_le_bytes());
+    tta.extend_from_slice(&16u16.to_le_bytes()); // bits_per_sample
+    tta.extend_from_slice(&sample_rate.to_le_bytes());
+    tta.extend_from_slice(&total_samples.to_le_bytes());
+    let hdr_crc = ieee_crc32(&tta[..18]);
+    tta.extend_from_slice(&hdr_crc.to_le_bytes());
+
+    // One seek-table entry: a 20-byte frame block (16-byte body + the
+    // 4-byte trailing CRC), then the seek-table CRC over the entries.
+    let disk_size: u32 = 20;
+    let entries_start = tta.len();
+    tta.extend_from_slice(&disk_size.to_le_bytes());
+    let st_crc = ieee_crc32(&tta[entries_start..]);
+    tta.extend_from_slice(&st_crc.to_le_bytes());
+
+    // 20 bytes of frame block so the seek-table entry is fully present.
+    tta.extend_from_slice(&[0xA5u8; 20]);
+
+    // ~52 M declared residuals against a 16-byte body: reachable only if
+    // the alloc happened; reaching the assertion proves it did not.
+    let r = decode(&tta);
+    assert!(
+        matches!(r, Err(Error::Truncated)),
+        "tiny-body huge-sample_count frame must surface Truncated, got {r:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // 5. Wrong-password format=2: never panic; if `Ok`, the PCM length is
 //    correct (sample-count and channel-count match the header).
 // ─────────────────────────────────────────────────────────────────────
