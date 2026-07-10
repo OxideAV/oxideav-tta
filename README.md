@@ -180,8 +180,21 @@ synthesises a valid encoder-produced stream, then byte-corrupts the
 region past the 22-byte header (seek table, frame bodies, per-frame
 trailers) so the decoder's seek-table walk, per-frame CRC check, Rice
 decoder, LMS / Stage-B predictors, and inverse decorrelation are all
-exercised on inputs that parse past the header. The contract is
-panic-freedom on arbitrary input.
+exercised on inputs that parse past the header. `geometry` explores the
+orthogonal axis: it hand-builds streams with a *valid* header CRC and a
+*valid* seek-table CRC but attacker-chosen geometry (any `format` /
+`channels` / `bits_per_sample` / `sample_rate` and the whole
+`total_samples` `u32` space, up to `u32::MAX`), a region neither the
+raw-byte nor the encoder-then-corrupt targets can reach. The contract is
+panic-freedom on arbitrary input **and no attacker-controlled
+allocation**: the decode-side output buffers are bounded by what the
+on-disk bytes can actually produce (every interleaved residual costs at
+least one bit, so no header field can inflate a preallocation past
+`8 × on-disk-length`), and a per-frame `sample_count` that cannot fit
+its body is rejected before the frame buffer is sized. A stream
+advertising billions of samples against a few bytes of body therefore
+surfaces a typed `Error::Truncated`, never a multi-gigabyte
+`Vec::with_capacity` abort.
 
 ```sh
 cargo +nightly fuzz run decode -- -max_total_time=60

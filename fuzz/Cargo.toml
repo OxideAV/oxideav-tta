@@ -215,3 +215,9 @@ name = "corrupt_decode"
 path = "fuzz_targets/corrupt_decode.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "geometry"
+path = "fuzz_targets/geometry.rs"
+test = false
+doc = false
