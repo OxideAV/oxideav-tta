@@ -126,9 +126,13 @@ fn main() {
 
     let mut total = std::time::Duration::ZERO;
     for sc in &scenarios {
-        let mut enc_hash: u64 = 0;
-        let start = Instant::now();
+        // Round 456: per-iteration timing with min / median reported
+        // (robust to preemption on a shared host) and the wire digest
+        // taken once outside the timed region — see `profile_decode`.
+        let mut per_iter: Vec<std::time::Duration> = Vec::with_capacity(iters);
+        let mut last: Vec<u8> = Vec::new();
         for _ in 0..iters {
+            let start = Instant::now();
             let bytes = match sc.password {
                 Some(pw) => encode_with_password(
                     &sc.pcm,
@@ -141,17 +145,27 @@ fn main() {
                 None => encode(&sc.pcm, sc.channels, sc.bits_per_sample, sc.sample_rate)
                     .expect("encode"),
             };
-            enc_hash = fnv1a_bytes(&bytes);
+            per_iter.push(start.elapsed());
+            last = bytes;
         }
-        let elapsed = start.elapsed();
+        let enc_hash = fnv1a_bytes(&last);
+        let elapsed: std::time::Duration = per_iter.iter().sum();
         total += elapsed;
+        per_iter.sort();
+        let min = per_iter[0];
+        let median = per_iter[per_iter.len() / 2];
+        let pcm_bytes = (sc.pcm.len() * sc.bits_per_sample.div_ceil(8) as usize) as f64;
+        let mib_s = pcm_bytes / (1024.0 * 1024.0) / min.as_secs_f64();
         println!(
-            "{:<30} iters={} enc_hash={:016x} elapsed={:?} per_iter={:?}",
+            "{:<30} iters={} enc_hash={:016x} elapsed={:?} per_iter={:?} min={:?} median={:?} min_mib_s={:.1}",
             sc.name,
             iters,
             enc_hash,
             elapsed,
-            elapsed / iters as u32
+            elapsed / iters as u32,
+            min,
+            median,
+            mib_s,
         );
     }
     println!("TOTAL encode wall time: {total:?}");
