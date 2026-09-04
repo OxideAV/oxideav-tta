@@ -65,29 +65,40 @@ pub fn decode_frame(
     descriptor: &FrameDescriptor,
     frame_bytes: &[u8],
 ) -> Result<Vec<i32>> {
+    let mut out = Vec::new();
     decode_frame_inner(
         header,
         descriptor,
         frame_bytes,
         /* qm_priming */ None,
         /* frame_idx */ 0,
+        &mut out,
         #[cfg(feature = "trace")]
         None,
-    )
+    )?;
+    Ok(out)
 }
 
 /// Internal frame-decode entry point used by both the public
 /// [`decode_frame`] and the `Decoder::decode_all` loop. The latter
 /// supplies a `frame_idx` for the trace counters and (when the
 /// `trace` feature is on) an `&mut TraceWriter` to emit events into.
+///
+/// The frame's `sample_count * channels` interleaved samples are
+/// **appended** to `out` (round 456: `decode_all` hands its whole-
+/// stream buffer straight in, so a multi-frame decode no longer pays
+/// a fresh per-frame `Vec` plus a `memmove` of every sample into the
+/// aggregate). On `Err` the appended region is unspecified — every
+/// caller either discards `out` or propagates the error.
 fn decode_frame_inner(
     header: &StreamHeader,
     descriptor: &FrameDescriptor,
     frame_bytes: &[u8],
     qm_priming: Option<&[i32; 8]>,
     frame_idx: u32,
+    out: &mut Vec<i32>,
     #[cfg(feature = "trace")] trace: Option<&mut TraceWriter>,
-) -> Result<Vec<i32>> {
+) -> Result<()> {
     let disk = descriptor.disk_size as usize;
     if frame_bytes.len() < disk {
         return Err(Error::Truncated);
@@ -122,7 +133,13 @@ fn decode_frame_inner(
         return Err(Error::Truncated);
     }
 
-    let mut out = vec![0i32; samples_per_frame * nch];
+    // Grow the caller's buffer by this frame's footprint and decode
+    // positionally into the new tail. `resize` zero-fills, so every
+    // slot is written exactly once below (positional store) and the
+    // gate above bounds the growth by the on-disk body length.
+    let out_start = out.len();
+    out.resize(out_start + samples_per_frame * nch, 0);
+    let frame_out = &mut out[out_start..];
 
     let mut reader = BitReader::new(body);
     let mut channels: Vec<ChannelState> = (0..nch)
@@ -151,15 +168,17 @@ fn decode_frame_inner(
     }
 
     // Per-step inner loop: for each PCM sample slot, decode every
-    // channel's Rice -> Stage-A -> Stage-B in turn into a scratch
-    // buffer, then run the inverse decorrelation cascade in place,
-    // then write into `out` interleaved.
-    let mut scratch: Vec<i32> = vec![0; nch];
+    // channel's Rice -> Stage-A -> Stage-B in turn straight into that
+    // slot's `nch` interleaved output entries, then run the inverse
+    // decorrelation cascade in place on the same slice. Writing into
+    // the output positionally (rather than via a scratch buffer that
+    // is then copied out) removes one `nch`-entry copy per sample.
     #[cfg(feature = "trace")]
     let mut step_idx: u32 = 0;
-    for sample_idx in 0..samples_per_frame {
-        for ch in 0..nch {
-            let cs = &mut channels[ch];
+    for (sample_idx, scratch) in frame_out.chunks_exact_mut(nch).enumerate() {
+        for (ch, (cs, slot)) in channels.iter_mut().zip(scratch.iter_mut()).enumerate() {
+            #[cfg(not(feature = "trace"))]
+            let _ = ch;
 
             #[cfg(feature = "trace")]
             {
@@ -224,7 +243,7 @@ fn decode_frame_inner(
                         sb_t.sample_after_b,
                     );
                 }
-                scratch[ch] = sb_t.sample_after_b;
+                *slot = sb_t.sample_after_b;
                 step_idx += 1;
             }
 
@@ -233,7 +252,7 @@ fn decode_frame_inner(
                 let e = rice::decode_one(&mut reader, &mut cs.rice)?;
                 let s_a = cs.lms.step(e);
                 let s_b = cs.stage_b.step(s_a);
-                scratch[ch] = s_b;
+                *slot = s_b;
             }
         }
 
@@ -242,22 +261,21 @@ fn decode_frame_inner(
             // DECORR_PRE / DECORR_POST are emitted only for nch > 1
             // per spec/06 §5.5; PCM_OUT always.
             if nch > 1 {
-                t.ev_decorr_pre(frame_idx, sample_idx as u32, &scratch);
+                t.ev_decorr_pre(frame_idx, sample_idx as u32, scratch);
             }
         }
 
-        decorr::inverse(&mut scratch);
+        decorr::inverse(scratch);
 
         #[cfg(feature = "trace")]
         if let Some(t) = &mut trace {
             if nch > 1 {
-                t.ev_decorr_post(frame_idx, sample_idx as u32, &scratch);
+                t.ev_decorr_post(frame_idx, sample_idx as u32, scratch);
             }
-            t.ev_pcm_out(frame_idx, sample_idx as u32, &scratch);
+            t.ev_pcm_out(frame_idx, sample_idx as u32, scratch);
         }
-
-        let base = sample_idx * nch;
-        out[base..base + nch].copy_from_slice(&scratch);
+        #[cfg(not(feature = "trace"))]
+        let _ = sample_idx;
     }
 
     // CRC verification — per spec §5.4 the trailing CRC covers every
@@ -283,7 +301,7 @@ fn decode_frame_inner(
     }
 
     let _ = frame_idx; // silence unused warning when `trace` is off
-    Ok(out)
+    Ok(())
 }
 
 /// Convenience structure: parse the header + seek table out of a
@@ -435,16 +453,16 @@ impl<'a> Decoder<'a> {
                 return Err(Error::Truncated);
             }
             let frame_bytes = &self.bytes[off..end];
-            let pcm = decode_frame_inner(
+            decode_frame_inner(
                 &self.header,
                 frame,
                 frame_bytes,
                 self.qm_priming.as_ref(),
                 i as u32,
+                &mut out,
                 #[cfg(feature = "trace")]
                 trace.as_mut(),
             )?;
-            out.extend_from_slice(&pcm);
         }
         Ok(out)
     }
@@ -475,15 +493,18 @@ impl<'a> Decoder<'a> {
             return Err(Error::Truncated);
         }
         let frame_bytes = &self.bytes[off..end];
+        let mut out = Vec::new();
         decode_frame_inner(
             &self.header,
             frame,
             frame_bytes,
             self.qm_priming.as_ref(),
             index as u32,
+            &mut out,
             #[cfg(feature = "trace")]
             None,
-        )
+        )?;
+        Ok(out)
     }
 
     /// Lazy iterator over the stream's frames. Each `next()` decodes
