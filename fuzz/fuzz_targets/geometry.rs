@@ -99,7 +99,7 @@ fuzz_target!(|data: &[u8]| {
     let regular = ((sample_rate as u64) * 256 / 245) as u32;
     let frame_count: usize = if regular == 0 || total_samples == 0 {
         0
-    } else if total_samples % regular == 0 {
+    } else if total_samples.is_multiple_of(regular) {
         (total_samples / regular) as usize
     } else {
         (total_samples / regular) as usize + 1

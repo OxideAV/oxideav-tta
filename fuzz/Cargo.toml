@@ -221,3 +221,15 @@ name = "geometry"
 path = "fuzz_targets/geometry.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "seek_table"
+path = "fuzz_targets/seek_table.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "password_corrupt"
+path = "fuzz_targets/password_corrupt.rs"
+test = false
+doc = false

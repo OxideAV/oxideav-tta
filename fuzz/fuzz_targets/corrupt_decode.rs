@@ -175,7 +175,7 @@ fuzz_target!(|data: &[u8]| {
     // mask flips attacker-chosen bits. XOR (rather than overwrite)
     // keeps a zero mask a no-op so the fuzzer can also probe the
     // "valid stream, no corruption" baseline.
-    for rec in mut_script.chunks_exact(3) {
+    for rec in mut_script.as_chunks::<3>().0 {
         let off = (u16::from_le_bytes([rec[0], rec[1]]) as usize) % body.len();
         body[off] ^= rec[2];
     }
