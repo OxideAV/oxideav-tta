@@ -6,6 +6,20 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-tta/compare/v0.0.4...v0.0.5) - 2026-09-04
+
+### Other
+
+- round-456 profile ledger, external black-box cross-check, format=3 status grounded in the staged spec
+- emit_corpus + decode_file for black-box external cross-checks
+- seek_table (forged entries behind a valid table CRC + unseekable twin) and password_corrupt (format=2 wrong/right/no password + corruption) targets
+- profile drivers time per iteration, report min/median + MiB/s, hash outside the timed loop
+- append frames straight into the caller's buffer + in-place per-slot decorrelation
+- add `geometry` target exploring valid-header/arbitrary-geometry streams
+- reject frames whose declared sample_count can't fit the body
+- bound output preallocation by on-disk length (oversized-header OOM guard)
+- add CI / crates.io / docs.rs / MIT-license badges
+
 ### Changed
 
 - Round-456 (depth mode: profile). **Decode −7..−15%**, byte-identical
