@@ -1,5 +1,97 @@
 # oxideav-tta benchmarks
 
+## Round-456 ledger (profile round)
+
+Same host class as round 386 (Apple-Silicon aarch64 macOS, umbrella
+release profile), but the host was **heavily shared** this round (load
+average ≈ 8 from sibling agents' test suites), so two methodology
+changes were made before anything was measured:
+
+* `profile_decode` / `profile_encode` now time every iteration on its
+  own and report the per-iteration **minimum** (stable under
+  preemption — a single descheduling used to inflate the whole
+  150-iteration total by more than any optimisation moves it) and the
+  median, plus MiB/s over the PCM footprint from that minimum. The
+  digests are computed once, outside the timed region: sampling showed
+  the byte-serial FNV chain at ~30% of the decode driver's samples.
+* A/B runs are **interleaved, 20 rounds × 30 iterations**, min per
+  scenario, against a baseline binary built from the pre-round commit
+  with the same drivers. A/A control on this host: ±1%.
+
+### Landed
+
+| Commit | Change | mono16 | stereo16 | stereo24 | 6ch16 | format2 |
+|---|---|---|---|---|---|---|
+| `9e72d83` | decode: frames appended straight into the caller's buffer + in-place per-slot decorrelation | −14.8% | −12.2% | −12.9% | −7.4% | −11.4% |
+
+MiB/s (per-iteration minimum, decoded-PCM footprint), pre-round →
+after `9e72d83`: mono16 206 → 242, stereo16 240 → 273, stereo24
+375 → 431, 6ch16 268 → 289, stereo16 format=2 241 → 272. Encoder
+unchanged (mono16 ≈ 141, stereo16 ≈ 180, stereo24 ≈ 320, 6ch16 ≈ 216,
+format=2 ≈ 183 MiB/s on the same runs).
+
+Sampling (`sample`, 4 s) before the change put `memmove` at ~6% of
+decode (the per-frame `Vec` → `extend_from_slice` copy) and the driver's
+own hashing at ~30%; the rest is the fully inlined `decode_all` loop.
+
+### Experiments measured and rejected (kept out of the tree)
+
+All A/B'd with the interleaved 20×30 method; deltas are vs the
+then-current HEAD.
+
+* **Encoder frames written in place** (one output `Vec`, seek-table
+  slot reserved and back-filled, `BitWriter` over the file buffer):
+  +1..+11% *slower*. Root cause found by experiment: the frame body
+  then starts at file offset `22 + 4·fc + 4 ≡ 2 (mod 4)`, so every
+  32-bit flush store and every slice-by-8 CRC load is misaligned;
+  padding the buffer to re-align the body brought it back to a wash
+  (−2.6..+2.5%). The copy it removed is worth less than the alignment
+  it lost, so the per-frame fresh `Vec` stays.
+* **Const-generic channel-count specialisation** of the decode body
+  (`decode_body::<NCH>` for 1..=6, state in a `[ChannelState; NCH]`):
+  +7..+19% slower. Scalar replacement of the `[i32; 8]` LMS
+  `dl`/`dx`/`qm` arrays defeats the NEON `mla.4s` vectorisation the
+  runtime-`nch` loop gets; the ILP the interleaved-channel loop already
+  extracts is not improvable this way.
+* **Branch-free adaptive-Rice decode** (mode select + tracker updates
+  as selects / masked arithmetic): +1.5..+8% slower — on this corpus
+  the low/high-mode branch predicts well, so the selects only add
+  work.
+* **Single-put Rice codeword** in the encoder (`u` ones + terminator +
+  `k`-bit tail in one cache insertion when they fit 32 bits):
+  +5..+12% slower.
+* **Encoder zip-iteration + stack scratch** in place of indexed channel
+  access and a heap scratch `Vec`: within noise.
+* **Register-resident bit writer** (borrowed pre-sized buffer, index
+  writes, `#[cold]` out-of-line growth so the writer's hot fields have
+  no escaping address): stack traffic in the sample loop halved
+  (57 → 23 references) yet +2..+6% slower. The encoder's ≈45 cycles
+  per sample×channel are therefore not a memory-forwarding chain; with
+  the round-386 conclusion this leaves the encoder's inner loop at
+  source-level saturation on this host.
+
+### Criterion sweep (round 456, shared host — indicative only)
+
+`--warm-up-time 1 --measurement-time 3`, load average ≈ 8. Medians;
+the controlled numbers are the A/B rows above.
+
+| Cell | decode | encode | roundtrip |
+|---|---|---|---|
+| mono/16/44k1/1s | 398 µs (211 MiB/s) | 699 µs (120 MiB/s) | 1.063 ms (79 MiB/s) |
+| stereo/16/44k1/1s | 758 µs (222 MiB/s) | 1.025 ms (164 MiB/s) | 1.799 ms (94 MiB/s) |
+| stereo/24/48k/500ms | 390 µs (352 MiB/s) | 480 µs (286 MiB/s) | 887 µs (155 MiB/s) |
+| 6ch/16/48k/250ms | 599 µs (229 MiB/s) | 715 µs (192 MiB/s) | 1.346 ms (102 MiB/s) |
+| stereo/17/44k1/500ms | 365 µs (346 MiB/s) | 446 µs (283 MiB/s) | — |
+| 3ch/20/48k/250ms | 270 µs (381 MiB/s) | 313 µs (329 MiB/s) | — |
+| stereo/16/44k1/format2/1s | 694 µs (242 MiB/s) | 1.035 ms (163 MiB/s) | 2.003 ms (84 MiB/s) |
+
+The streaming / range / demuxer harnesses were not re-swept: their
+cells go through the same `decode_frame_at` path (which now allocates
+its per-frame `Vec` once and decodes into it directly) and the
+demuxer does no entropy decode.
+
+## Round-386 ledger
+
 Round-386 depth-mode sweep (bench + profile). All numbers below were
 taken on one Apple-Silicon (aarch64) macOS host with the workspace
 release profile (`opt-level = 3`, `lto = "thin"`, `codegen-units = 1`),
@@ -160,9 +252,16 @@ entropy decode), hence microseconds; `seek_to` is a table lookup.
 cargo bench -p oxideav-tta
 
 # Low-noise wall-clock A/B drivers (also bit-identity oracles — the
-# printed FNV-1a hashes must not change across optimisation commits):
+# printed FNV-1a hashes must not change across optimisation commits).
+# Per-iteration min / median + MiB/s are printed; interleave runs of a
+# baseline and a candidate binary and take the min per scenario:
 cargo run --release --example profile_decode -- 150
 cargo run --release --example profile_encode -- 150
+
+# External black-box cross-check corpus (.tta + packed-PCM sidecars),
+# and a .tta -> packed-PCM decoder for the reverse direction:
+cargo run --release --example emit_corpus -- /tmp/tta-corpus
+cargo run --release --example decode_file -- in.tta out.pcm [password]
 
 # Byte-exactness regression pins:
 cargo test -p oxideav-tta --test bitexact_pins

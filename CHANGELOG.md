@@ -6,6 +6,57 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Round-456 (depth mode: profile). **Decode −7..−15%**, byte-identical
+  outputs (`tests/bitexact_pins.rs` + the driver digests): frames are
+  decoded straight into the caller's whole-stream buffer instead of a
+  fresh per-frame `Vec` that was then copied, and each sample's channel
+  outputs are written into their interleaved output slot with the
+  `spec/04` inverse decorrelation run in place (no scratch copy).
+  Interleaved min-of-N A/B on the pre-round baseline: mono16 −14.8%
+  (206 → 242 MiB/s), stereo16 −12.2% (240 → 273), stereo24 −12.9%
+  (375 → 431), 6ch16 −7.4% (268 → 289), format=2 −11.4% (241 → 272).
+  Six further candidates were measured and rejected (see
+  `BENCHMARKS.md`): in-place encoder frame writes (the body then starts
+  at a `≡ 2 mod 4` offset and the misaligned flush stores cost what
+  the copy saved), const-generic channel-count specialisation (+7..+19%
+  — scalar-replacing the 8-tap LMS state defeats its vectorisation),
+  branch-free Rice trackers (+1.5..+8%), a single-put Rice codeword
+  (+5..+12%), zip/stack-scratch encoder loop (noise), and a
+  register-resident bit writer (+2..+6%). The encoder's wire bytes are
+  unchanged.
+- `profile_decode` / `profile_encode` time each iteration on its own and
+  report min / median plus a MiB/s figure; the FNV digest is taken once
+  outside the timed region (it was ~30% of the sampled decode time and
+  diluted every delta).
+
+### Added
+
+- Fuzz targets `seek_table` (forged seek-table entries behind a valid
+  table CRC over an intact encoder stream, plus the stale-CRC
+  unseekable twin, driven through the `Decoder` random-access surface
+  and the registry demuxer) and `password_corrupt` (format=2 streams
+  under wrong / right / no password, before and after post-header
+  corruption, eager vs streaming differential). Both ran 300 s clean
+  in the foreground; three hand-built seeds each are checked in.
+- Examples `emit_corpus` (the pinned corpus as `.tta` + packed-PCM
+  sidecars) and `decode_file` (any `.tta` → packed PCM) for black-box
+  cross-checks against external binaries. This round: all ten emitted
+  streams (including the packed 17/20-bit widths, 6-channel, and two
+  format=2 cells) decode through an independent TTA decoder binary to
+  PCM identical to the encoder input, and that binary's own TTA
+  encoder output for five cells is byte-identical to this crate's wire
+  bytes (modulo its appended tag trailer) and decodes here bit-exactly.
+
+### Documentation
+
+- README: external cross-check, format=3 status grounded in the staged
+  spec (`spec/00` §Out-of-scope / `spec/01` §3.1 mandate rejection of
+  `format > 2`; no float mapping is defined), new fuzz targets.
+  `BENCHMARKS.md`: round-456 ledger, rejected experiments, re-swept
+  cells.
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-tta/compare/v0.0.3...v0.0.4) - 2026-07-03
 
 ### Other

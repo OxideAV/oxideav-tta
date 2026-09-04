@@ -61,13 +61,29 @@ bit-exactly through the decoder.
   `OXIDEAV_TTA_TRACE_FILE` is set, for clean-room lockstep diffing.
   Zero overhead when the feature is off.
 
+* **External black-box cross-check, both directions** (round 456).
+  Every stream the encoder emits for the pinned corpus — mono / stereo
+  / 3-ch / 6-ch at 16 / 17 / 20 / 24 bits plus two format=2 password
+  cells — decodes through an independent, widely deployed TTA-capable
+  decoder binary (`ffmpeg`, driven strictly as a black box) to PCM
+  identical to the encoder's input; and streams produced by that
+  binary's own TTA encoder for five of those cells are **byte-identical
+  to this crate's wire output** (it only appends a metadata tag
+  trailer) and decode through this crate bit-exactly. The
+  `emit_corpus` / `decode_file` examples reproduce the check.
+
 ## Not yet supported
 
-* **Format=3** (IEEE float PCM).
-* Bit-exact lockstep against externally-encoded reference fixtures —
-  deferred until a sanctioned reference fixture lands in the clean-room
-  workspace. Verification today is self-roundtrip plus spec worked-step
-  hand-verifications (see below).
+* **Format=3** (IEEE float PCM). The staged clean-room spec records
+  it as "not implemented upstream" (`spec/00` §Out-of-scope) and lists
+  it "only so a parser can reject it cleanly", mandating rejection of
+  `format > 2` (`spec/01` §3.1); no float sample mapping is defined
+  anywhere in `spec/` or `tables/`. The parser therefore rejects it
+  with `Error::UnsupportedFormat(3)` by design; support is blocked on
+  a spec definition, not on implementation work.
+* A sanctioned reference fixture *inside* the clean-room workspace is
+  still absent; the external cross-check above (a binary used as a
+  black box) is what stands in for it.
 
 ## Usage
 
@@ -194,7 +210,22 @@ least one bit, so no header field can inflate a preallocation past
 its body is rejected before the frame buffer is sized. A stream
 advertising billions of samples against a few bytes of body therefore
 surfaces a typed `Error::Truncated`, never a multi-gigabyte
-`Vec::with_capacity` abort.
+`Vec::with_capacity` abort. `seek_table` (round 456) starts from a
+valid encoder-produced multi-frame stream and rewrites its seek-table
+entries to attacker-chosen sizes behind a *re-computed, valid* table
+CRC, so the decoder trusts them and every random-access path
+(`seek_to_sample` / `decode_frame_at` / `frame_iter_from` /
+`decode_from_sample` / `decode_sample_range` and the registry
+demuxer's `seek_to`) runs its slice arithmetic off forged values; the
+same forgery behind the stale CRC must engage the unseekable-mode
+refusals, and an untouched table must reproduce the input PCM on every
+path. `password_corrupt` (round 456) drives format=2 streams under the
+wrong password (the per-frame CRC covers the coded bytes, so a foreign
+`qm` prime decodes "successfully" into wrapping-territory LMS state),
+the right password (bit-exact on eager and every streaming path) and no
+password (typed `PasswordRequired`), then repeats all three after
+post-header corruption with eager == streaming asserted whenever both
+succeed.
 
 ```sh
 cargo +nightly fuzz run decode -- -max_total_time=60
@@ -208,11 +239,17 @@ deterministic synthetic corpus (mono16 / stereo16 / stereo17 /
 stereo24 / 3ch20 / 6ch16 / format=2). The `demuxer` harness covers the
 registry `Demuxer` open / `next_packet`-drain / O(1) `seek_to` paths.
 See [BENCHMARKS.md](BENCHMARKS.md) for the full per-cell sweep, the
-round-386 optimisation ledger (slice-by-8 CRC32, u64 bulk-refill bit
-reader, 4-byte-flush bit writer — decode −6..−19%, encode −8..−20%
-per interleaved A/B, outputs byte-identical under
-`tests/bitexact_pins.rs`), and the reproduction recipe. Numbers move
-with host hardware; the value is the relative cost across scenarios.
+optimisation ledgers (round 386: slice-by-8 CRC32, u64 bulk-refill bit
+reader, 4-byte-flush bit writer — decode −6..−19%, encode −8..−20%;
+round 456: frames decoded straight into the caller's buffer with
+in-place per-slot decorrelation — decode −7..−15%, e.g. stereo 24-bit
+375 → 431 MiB/s), the experiments measured and rejected, and the
+reproduction recipe. Outputs stay byte-identical under
+`tests/bitexact_pins.rs`. Numbers move with host hardware; the value is
+the relative cost across scenarios. The `profile_decode` /
+`profile_encode` examples are the low-noise A/B drivers (per-iteration
+min / median, digests as bit-identity oracle); `emit_corpus` /
+`decode_file` are the external cross-check drivers.
 
 ```sh
 cargo bench
