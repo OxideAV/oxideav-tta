@@ -89,6 +89,8 @@ bit-exactly through the decoder.
 
 ```rust
 use oxideav_tta::{encode, Decoder};
+# let (channels, bits_per_sample, sample_rate) = (2u16, 16u16, 44_100u32);
+# let samples = vec![0i32; 4096 * channels as usize];
 
 // `samples` is interleaved i32 PCM (S16 or S24 range per bits_per_sample).
 let tta_bytes = encode(&samples, channels, bits_per_sample, sample_rate)?;
