@@ -76,7 +76,7 @@
 //! target validates the *typed lift* layered on top of them.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_tta::{detect_trailers, scan_trailers, ApeV2Range, Error, Id3v1Range, TrailerInfo};
+use oxideav_tta::{ApeV2Range, Error, Id3v1Range, TrailerInfo, detect_trailers, scan_trailers};
 
 /// Assert the documented `spec/01` §7 invariants on a `TrailerInfo`
 /// that was produced by the scanner (`scan_trailers` / `detect_trailers`)

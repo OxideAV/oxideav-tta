@@ -139,33 +139,33 @@ fuzz_target!(|data: &[u8]| {
                 // Packed-length invariant: the byte buffer the adapter
                 // emits must be exactly `decoded_samples *
                 // bytes_per_sample` for the configured output format.
-                if let Some(fmt) = configured_format {
-                    if let Some(bps) = packed_bytes_per_sample(fmt) {
-                        // The decoder emits one data plane.
-                        if audio.data.len() == 1 {
-                            let plane_len = audio.data[0].len();
-                            // The plane length must be a whole number of
-                            // samples …
-                            assert_eq!(
-                                plane_len % bps,
-                                0,
-                                "packed audio plane {plane_len} not a multiple of \
+                if let Some(fmt) = configured_format
+                    && let Some(bps) = packed_bytes_per_sample(fmt)
+                {
+                    // The decoder emits one data plane.
+                    if audio.data.len() == 1 {
+                        let plane_len = audio.data[0].len();
+                        // The plane length must be a whole number of
+                        // samples …
+                        assert_eq!(
+                            plane_len % bps,
+                            0,
+                            "packed audio plane {plane_len} not a multiple of \
                                  bytes-per-sample {bps} (fmt={fmt:?})"
-                            );
-                            // … and the sample count it implies must be
-                            // consistent with the frame's declared
-                            // per-frame sample budget (samples *
-                            // channels), so the packer can neither drop
-                            // nor duplicate a sample.
-                            if let Some(channels) = params.channels {
-                                let expected = (audio.samples as usize) * (channels as usize) * bps;
-                                assert_eq!(
-                                    plane_len, expected,
-                                    "packed audio plane {plane_len} != \
+                        );
+                        // … and the sample count it implies must be
+                        // consistent with the frame's declared
+                        // per-frame sample budget (samples *
+                        // channels), so the packer can neither drop
+                        // nor duplicate a sample.
+                        if let Some(channels) = params.channels {
+                            let expected = (audio.samples as usize) * (channels as usize) * bps;
+                            assert_eq!(
+                                plane_len, expected,
+                                "packed audio plane {plane_len} != \
                                      samples({}) * channels({channels}) * bps({bps}) = {expected}",
-                                    audio.samples
-                                );
-                            }
+                                audio.samples
+                            );
                         }
                     }
                 }

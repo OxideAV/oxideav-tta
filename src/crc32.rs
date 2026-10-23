@@ -99,9 +99,9 @@ impl Crc32 {
     /// the sub-8-byte tail; the result is byte-for-byte identical to
     /// repeated [`Self::update_byte`].
     pub fn update(&mut self, bytes: &[u8]) {
-        let mut chunks = bytes.chunks_exact(8);
+        let (chunks, remainder) = bytes.as_chunks::<8>();
         let mut crc = self.state;
-        for chunk in &mut chunks {
+        for chunk in chunks {
             let lo = u32::from_le_bytes(chunk[0..4].try_into().unwrap()) ^ crc;
             let hi = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
             crc = TABLES[7][(lo & 0xFF) as usize]
@@ -114,7 +114,7 @@ impl Crc32 {
                 ^ TABLES[0][(hi >> 24) as usize];
         }
         self.state = crc;
-        for &b in chunks.remainder() {
+        for &b in remainder {
             self.update_byte(b);
         }
     }

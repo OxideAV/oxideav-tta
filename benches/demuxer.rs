@@ -51,7 +51,7 @@
 
 use std::io::Cursor;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_core::{CodecId, CodecResolver, ProbeContext, ReadSeek, RuntimeContext};
 use oxideav_tta::{encode, encode_with_password, register};

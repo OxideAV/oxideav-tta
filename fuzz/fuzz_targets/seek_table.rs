@@ -75,7 +75,7 @@ use libfuzzer_sys::fuzz_target;
 use std::io::Cursor;
 
 use oxideav_core::{CodecId, CodecResolver, ProbeContext, ReadSeek, RuntimeContext};
-use oxideav_tta::{register, Decoder, Error};
+use oxideav_tta::{Decoder, Error, register};
 
 const MAX_SAMPLES_PER_CHANNEL: usize = 6000;
 const HEADER_LEN: usize = 22;
@@ -378,10 +378,11 @@ fuzz_target!(|data: &[u8]| {
 
     // Variant B: forged entries behind the STALE original CRC —
     // unseekable mode must engage whenever an entry actually changed.
-    if touched && forged != original {
-        if let Ok(dec) = Decoder::new(&forged) {
-            drive_unseekable(&dec);
-        }
+    if touched
+        && forged != original
+        && let Ok(dec) = Decoder::new(&forged)
+    {
+        drive_unseekable(&dec);
     }
 
     // ── Registry demuxer over both variants ────────────────────────

@@ -53,7 +53,7 @@
 //! refactor that keeps the public contract keeps the tests green.
 
 use oxideav_tta::{
-    decode, decode_with_password, encode, encode_with_password, scan_trailers, Error,
+    Error, decode, decode_with_password, encode, encode_with_password, scan_trailers,
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -529,15 +529,15 @@ fn build_id3v2_prefix(syncsafe_payload_len: usize, footer: bool) -> Vec<u8> {
     buf.push(4); // major version
     buf.push(0); // minor version
     buf.push(if footer { 0x10 } else { 0x00 }); // flags
-                                                // 28-bit syncsafe length over 4 bytes (top bit of each byte = 0).
+    // 28-bit syncsafe length over 4 bytes (top bit of each byte = 0).
     let n = syncsafe_payload_len as u32;
     buf.push(((n >> 21) & 0x7F) as u8);
     buf.push(((n >> 14) & 0x7F) as u8);
     buf.push(((n >> 7) & 0x7F) as u8);
     buf.push((n & 0x7F) as u8);
-    buf.extend(std::iter::repeat(0u8).take(syncsafe_payload_len));
+    buf.extend(std::iter::repeat_n(0u8, syncsafe_payload_len));
     if footer {
-        buf.extend(std::iter::repeat(0u8).take(10));
+        buf.extend(std::iter::repeat_n(0u8, 10));
     }
     buf
 }

@@ -483,7 +483,7 @@ mod tests {
         let mut buf = prefix(50);
         // Build a 128-byte ID3v1 trailer: "TAG" + 125 bytes of padding.
         buf.extend_from_slice(b"TAG");
-        buf.extend(std::iter::repeat(0u8).take(125));
+        buf.extend(std::iter::repeat_n(0u8, 125));
         assert_eq!(buf.len(), 50 + 128);
         let info = detect_trailers(&buf, 50);
         assert_eq!(info.id3v1, Some((50, 128)));
@@ -497,7 +497,7 @@ mod tests {
     fn id3v1_not_detected_when_eos_too_close_to_end() {
         let mut buf = prefix(200);
         buf.extend_from_slice(b"TAG");
-        buf.extend(std::iter::repeat(0u8).take(20)); // only 23 trailer bytes
+        buf.extend(std::iter::repeat_n(0u8, 20)); // only 23 trailer bytes
         let info = detect_trailers(&buf, 200);
         assert_eq!(info.id3v1, None);
     }
@@ -505,8 +505,8 @@ mod tests {
     /// Build a valid APEv2 footer (no header).
     fn build_ape_footer_only(item_count: u32, body_size: usize) -> Vec<u8> {
         let mut out = Vec::with_capacity(32 + body_size);
-        out.extend(std::iter::repeat(0xAAu8).take(body_size)); // body
-                                                               // Footer (32 bytes).
+        out.extend(std::iter::repeat_n(0xAAu8, body_size)); // body
+        // Footer (32 bytes).
         out.extend_from_slice(b"APETAGEX");
         out.extend_from_slice(&2000u32.to_le_bytes()); // version
         out.extend_from_slice(&((body_size + 32) as u32).to_le_bytes()); // tag_size = body + footer
@@ -529,8 +529,8 @@ mod tests {
         let header_flags: u32 = 0x8000_0000 | 0x4000_0000; // has_header + is_header
         out.extend_from_slice(&header_flags.to_le_bytes());
         out.extend_from_slice(&[0u8; 8]);
-        out.extend(std::iter::repeat(0xAAu8).take(body_size)); // body
-                                                               // Footer (32 bytes).
+        out.extend(std::iter::repeat_n(0xAAu8, body_size)); // body
+        // Footer (32 bytes).
         out.extend_from_slice(b"APETAGEX");
         out.extend_from_slice(&2000u32.to_le_bytes());
         out.extend_from_slice(&((body_size + 32) as u32).to_le_bytes());
@@ -574,7 +574,7 @@ mod tests {
         let ape_end_off = buf.len();
         // Append the ID3v1 trailer immediately after the APE region.
         buf.extend_from_slice(b"TAG");
-        buf.extend(std::iter::repeat(0u8).take(125));
+        buf.extend(std::iter::repeat_n(0u8, 125));
         let info = detect_trailers(&buf, 200);
         assert_eq!(info.id3v1, Some((ape_end_off, 128)));
         assert_eq!(info.apev2, Some((200, ape_len)));
@@ -590,7 +590,7 @@ mod tests {
         // available past eos).
         let body_size = 10;
         let bogus_tag_size = 200u32;
-        buf.extend(std::iter::repeat(0xAAu8).take(body_size));
+        buf.extend(std::iter::repeat_n(0xAAu8, body_size));
         buf.extend_from_slice(b"APETAGEX");
         buf.extend_from_slice(&2000u32.to_le_bytes());
         buf.extend_from_slice(&bogus_tag_size.to_le_bytes());
@@ -611,7 +611,7 @@ mod tests {
     #[test]
     fn no_apev2_when_footer_magic_absent() {
         let mut buf = prefix(50);
-        buf.extend(std::iter::repeat(0u8).take(64)); // no magic anywhere
+        buf.extend(std::iter::repeat_n(0u8, 64)); // no magic anywhere
         let info = detect_trailers(&buf, 50);
         assert!(info.is_empty());
     }
@@ -750,7 +750,7 @@ mod tests {
         // Build a real ID3v1-only buffer and lift it via the parser.
         let mut buf = prefix(50);
         buf.extend_from_slice(b"TAG");
-        buf.extend(std::iter::repeat(0u8).take(125));
+        buf.extend(std::iter::repeat_n(0u8, 125));
         let file_len = buf.len(); // = 178
         let info = detect_trailers(&buf, 50);
         let id3 = info.id3v1_typed(file_len).unwrap().expect("present");
@@ -786,7 +786,7 @@ mod tests {
         buf.extend(ape);
         let ape_end_off = buf.len();
         buf.extend_from_slice(b"TAG");
-        buf.extend(std::iter::repeat(0u8).take(125));
+        buf.extend(std::iter::repeat_n(0u8, 125));
         let file_len = buf.len();
         let info = detect_trailers(&buf, 200);
         let id3 = info.id3v1_typed(file_len).unwrap().expect("present");

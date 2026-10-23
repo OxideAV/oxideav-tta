@@ -16,7 +16,7 @@
 
 #![cfg(test)]
 
-use crate::{decode, decode_with_password, encode, encode_with_password, Decoder, Error};
+use crate::{Decoder, Error, decode, decode_with_password, encode, encode_with_password};
 
 /// Build a deterministic multi-frame stereo 16-bit stream and return
 /// `(bytes, regular_frame_samples, frame_count, total_samples)`.

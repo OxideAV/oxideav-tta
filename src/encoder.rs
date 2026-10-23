@@ -30,7 +30,7 @@
 
 use crate::error::{Error, Result};
 use crate::lms::LmsState;
-use crate::rice::{zigzag, RiceState, MAX_K};
+use crate::rice::{MAX_K, RiceState, zigzag};
 use crate::stage_b::StageBState;
 
 /// Maximum supported channels per `spec/01` §3 (mirrors the decoder's
@@ -121,7 +121,7 @@ fn encode_inner(
         return Err(Error::UnsupportedSampleRate(sample_rate));
     }
     let nch = channels as usize;
-    if samples.len() % nch != 0 {
+    if !samples.len().is_multiple_of(nch) {
         return Err(Error::InvalidSampleBuffer);
     }
     let total_samples = (samples.len() / nch) as u32;

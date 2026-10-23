@@ -67,9 +67,9 @@
 
 use core::time::Duration;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use oxideav_tta::{encode, encode_with_password, Decoder};
+use oxideav_tta::{Decoder, encode, encode_with_password};
 
 /// Cheap deterministic xorshift32 — mirrors the helper used in the
 /// other four TTA bench harnesses (`decode.rs`, `encode.rs`,

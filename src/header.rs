@@ -1412,20 +1412,28 @@ mod tests {
         // frame; the last frame is the only one allowed to be shorter.
         let regular = 46_080u32;
         // Below or at the cap: in-bound.
-        assert!(FrameSampleCount::from_raw(1)
-            .unwrap()
-            .is_within_regular_bound(regular));
-        assert!(FrameSampleCount::from_raw(regular)
-            .unwrap()
-            .is_within_regular_bound(regular));
+        assert!(
+            FrameSampleCount::from_raw(1)
+                .unwrap()
+                .is_within_regular_bound(regular)
+        );
+        assert!(
+            FrameSampleCount::from_raw(regular)
+                .unwrap()
+                .is_within_regular_bound(regular)
+        );
         // Above the cap: out of bound (cannot be a legal frame at
         // this sample rate).
-        assert!(!FrameSampleCount::from_raw(regular + 1)
-            .unwrap()
-            .is_within_regular_bound(regular));
-        assert!(!FrameSampleCount::from_raw(u32::MAX)
-            .unwrap()
-            .is_within_regular_bound(regular));
+        assert!(
+            !FrameSampleCount::from_raw(regular + 1)
+                .unwrap()
+                .is_within_regular_bound(regular)
+        );
+        assert!(
+            !FrameSampleCount::from_raw(u32::MAX)
+                .unwrap()
+                .is_within_regular_bound(regular)
+        );
     }
 
     #[test]
@@ -1893,14 +1901,14 @@ mod tests {
         buf.push(0); // minor
         buf.push(0); // flags
         buf.extend_from_slice(&[0, 0, 0, 17]);
-        buf.extend(std::iter::repeat(0u8).take(17));
+        buf.extend(std::iter::repeat_n(0u8, 17));
         assert_eq!(skip_id3v2_prefix(&buf).unwrap(), 27);
 
         // Footer flag adds 10 more bytes.
         let mut buf2 = buf.clone();
         buf2[5] = 0x10;
         // Need to ensure the buffer is large enough; pad to 37.
-        buf2.extend(std::iter::repeat(0u8).take(10));
+        buf2.extend(std::iter::repeat_n(0u8, 10));
         assert_eq!(skip_id3v2_prefix(&buf2).unwrap(), 37);
     }
 }

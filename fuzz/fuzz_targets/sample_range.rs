@@ -224,18 +224,18 @@ fuzz_target!(|data: &[u8]| {
     let from_sample_call = dec.decode_from_sample(start);
     let from_sample_iter_call = dec.frame_iter_from_sample(start);
 
-    if let (Some(Ok(eager_samples)), Ok(from_samples)) = (eager.as_ref(), &from_sample_call) {
-        if start < total_samples {
-            let prefix_entries = (start as usize).saturating_mul(channels);
-            if prefix_entries <= eager_samples.len() {
-                assert_eq!(
-                    from_samples,
-                    &eager_samples[prefix_entries..],
-                    "decode_from_sample({start}) tail disagrees with eager: \
+    if let (Some(Ok(eager_samples)), Ok(from_samples)) = (eager.as_ref(), &from_sample_call)
+        && start < total_samples
+    {
+        let prefix_entries = (start as usize).saturating_mul(channels);
+        if prefix_entries <= eager_samples.len() {
+            assert_eq!(
+                from_samples,
+                &eager_samples[prefix_entries..],
+                "decode_from_sample({start}) tail disagrees with eager: \
                      channels={channels} bps={} frames={frame_count}",
-                    dec.header.bits_per_sample,
-                );
-            }
+                dec.header.bits_per_sample,
+            );
         }
     }
 
@@ -329,29 +329,29 @@ fuzz_target!(|data: &[u8]| {
     // `decode_from_sample(s)` when `s < total`. Gated on the eager
     // path succeeding so a malformed stream that fails decode_all
     // does not produce spurious assertions here.
-    if let Some(Ok(eager_samples)) = eager.as_ref() {
-        if let Ok(full_range) = dec.decode_sample_range(0, total_samples) {
-            assert_eq!(
-                &full_range, eager_samples,
-                "decode_sample_range(0, total) != decode_all: \
+    if let Some(Ok(eager_samples)) = eager.as_ref()
+        && let Ok(full_range) = dec.decode_sample_range(0, total_samples)
+    {
+        assert_eq!(
+            &full_range, eager_samples,
+            "decode_sample_range(0, total) != decode_all: \
                  channels={channels} bps={} frames={frame_count}",
-                dec.header.bits_per_sample,
-            );
-        }
+            dec.header.bits_per_sample,
+        );
     }
 
-    if start < total_samples {
-        if let (Ok(tail_range), Ok(tail_from)) = (
+    if start < total_samples
+        && let (Ok(tail_range), Ok(tail_from)) = (
             dec.decode_sample_range(start, total_samples),
             dec.decode_from_sample(start),
-        ) {
-            assert_eq!(
-                tail_range, tail_from,
-                "decode_sample_range({start}, total) != decode_from_sample({start}): \
+        )
+    {
+        assert_eq!(
+            tail_range, tail_from,
+            "decode_sample_range({start}, total) != decode_from_sample({start}): \
                  channels={channels} bps={} frames={frame_count}",
-                dec.header.bits_per_sample,
-            );
-        }
+            dec.header.bits_per_sample,
+        );
     }
 
     // ── 6. Duration-keyed surface. ──────────────────────────────

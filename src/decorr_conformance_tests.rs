@@ -347,10 +347,10 @@ fn cascade_is_stateless_across_sample_slots() {
 #[cfg(feature = "trace")]
 fn parse_arr(line: &str, key: &str) -> Option<Vec<i32>> {
     for field in line.split('\t') {
-        if let Some(rest) = field.strip_prefix(key) {
-            if let Some(vals) = rest.strip_prefix('=') {
-                return Some(vals.split(',').map(|v| v.parse::<i32>().unwrap()).collect());
-            }
+        if let Some(rest) = field.strip_prefix(key)
+            && let Some(vals) = rest.strip_prefix('=')
+        {
+            return Some(vals.split(',').map(|v| v.parse::<i32>().unwrap()).collect());
         }
     }
     None

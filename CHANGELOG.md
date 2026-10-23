@@ -8,6 +8,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- edition 2024, MSRV 1.95
 - Round-456 (depth mode: profile). **Decode −7..−15%**, byte-identical
   outputs (`tests/bitexact_pins.rs` + the driver digests): frames are
   decoded straight into the caller's whole-stream buffer instead of a

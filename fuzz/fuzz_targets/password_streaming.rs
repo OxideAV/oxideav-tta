@@ -172,30 +172,30 @@ fuzz_target!(|data: &[u8]| {
         let target_frame_index = target_frame_seed % frame_count;
         let frame_pcm = dec.decode_frame_at(target_frame_index);
 
-        if frame_count <= MAX_FRAMES_FOR_CROSSCHECK {
-            if let (Ok(frame_samples), Ok(eager_samples)) = (&frame_pcm, &eager) {
-                let nch = dec.header.channels as usize;
-                let preceding: usize = dec.frames[..target_frame_index]
-                    .iter()
-                    .map(|f| f.sample_count as usize)
-                    .sum();
-                let this_frame_samples = dec.frames[target_frame_index].sample_count as usize;
-                let start = preceding * nch;
-                let end = start + this_frame_samples * nch;
-                // Defensive bound: a corrupt seek table whose geometry
-                // disagrees with the eager output must not surface as a
-                // fuzz crash — the eager-vs-lazy cross-check above
-                // already pins the canonical PCM.
-                if end <= eager_samples.len() {
-                    assert_eq!(
-                        frame_samples,
-                        &eager_samples[start..end],
-                        "decode_frame_at({target_frame_index}) PCM disagrees with eager slice: \
+        if frame_count <= MAX_FRAMES_FOR_CROSSCHECK
+            && let (Ok(frame_samples), Ok(eager_samples)) = (&frame_pcm, &eager)
+        {
+            let nch = dec.header.channels as usize;
+            let preceding: usize = dec.frames[..target_frame_index]
+                .iter()
+                .map(|f| f.sample_count as usize)
+                .sum();
+            let this_frame_samples = dec.frames[target_frame_index].sample_count as usize;
+            let start = preceding * nch;
+            let end = start + this_frame_samples * nch;
+            // Defensive bound: a corrupt seek table whose geometry
+            // disagrees with the eager output must not surface as a
+            // fuzz crash — the eager-vs-lazy cross-check above
+            // already pins the canonical PCM.
+            if end <= eager_samples.len() {
+                assert_eq!(
+                    frame_samples,
+                    &eager_samples[start..end],
+                    "decode_frame_at({target_frame_index}) PCM disagrees with eager slice: \
                          channels={} bps={} frames={frame_count} pw_len={pw_len}",
-                        dec.header.channels,
-                        dec.header.bits_per_sample,
-                    );
-                }
+                    dec.header.channels,
+                    dec.header.bits_per_sample,
+                );
             }
         }
     } else {
@@ -241,24 +241,24 @@ fuzz_target!(|data: &[u8]| {
         .collect::<Result<Vec<Vec<i32>>, _>>()
         .map(|frames| frames.into_iter().flatten().collect());
 
-    if frame_count <= MAX_FRAMES_FOR_CROSSCHECK {
-        if let (Ok(from_samples), Ok(eager_samples)) = (&from_concat, &eager) {
-            let nch = dec.header.channels as usize;
-            let preceding: usize = dec.frames[..start_index]
-                .iter()
-                .map(|f| f.sample_count as usize)
-                .sum();
-            let start = preceding * nch;
-            if start <= eager_samples.len() {
-                assert_eq!(
-                    from_samples,
-                    &eager_samples[start..],
-                    "frame_iter_from({start_index}) suffix disagrees with eager: \
+    if frame_count <= MAX_FRAMES_FOR_CROSSCHECK
+        && let (Ok(from_samples), Ok(eager_samples)) = (&from_concat, &eager)
+    {
+        let nch = dec.header.channels as usize;
+        let preceding: usize = dec.frames[..start_index]
+            .iter()
+            .map(|f| f.sample_count as usize)
+            .sum();
+        let start = preceding * nch;
+        if start <= eager_samples.len() {
+            assert_eq!(
+                from_samples,
+                &eager_samples[start..],
+                "frame_iter_from({start_index}) suffix disagrees with eager: \
                      channels={} bps={} frames={frame_count} pw_len={pw_len}",
-                    dec.header.channels,
-                    dec.header.bits_per_sample,
-                );
-            }
+                dec.header.channels,
+                dec.header.bits_per_sample,
+            );
         }
     }
 });

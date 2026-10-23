@@ -57,7 +57,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use oxideav_tta::{decode, decode_with_password, Decoder, Error};
+use oxideav_tta::{Decoder, Error, decode, decode_with_password};
 
 const MAX_SAMPLES_PER_CHANNEL: usize = 6000;
 const HEADER_LEN: usize = 22;

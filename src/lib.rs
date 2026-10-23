@@ -110,8 +110,8 @@ mod trace;
 mod trailers;
 
 pub use crate::decoder::{
-    decode_frame, Decoder, FrameIndex, FrameIter, InFrameSampleOffset, SampleRangeIter,
-    SampleSkipIter, SeekPoint,
+    Decoder, FrameIndex, FrameIter, InFrameSampleOffset, SampleRangeIter, SampleSkipIter,
+    SeekPoint, decode_frame,
 };
 pub use crate::encoder::{encode, encode_with_password};
 pub use crate::error::{Error, Result};
@@ -119,7 +119,7 @@ pub use crate::header::{
     BitsPerSample, ChannelCount, Format, FrameByteLength, FrameDescriptor, FrameGeometry,
     FrameSampleCount, SampleRate, StreamHeader, TotalSamples, TypedStreamHeader,
 };
-pub use crate::trailers::{detect_trailers, ApeV2Range, Id3v1Range, TrailerInfo};
+pub use crate::trailers::{ApeV2Range, Id3v1Range, TrailerInfo, detect_trailers};
 
 /// Re-exported alias for the parsed stream header. [`StreamInfo`] is
 /// the same type as [`StreamHeader`] under a more public-friendly
@@ -239,7 +239,7 @@ pub fn pack_pcm(samples: &[i32], bits_per_sample: u16) -> Vec<u8> {
 // `__oxideav_entry` hook into `oxideav-meta::register_all`. Standalone
 // (no-`oxideav-core`) builds drop both.
 #[cfg(feature = "registry")]
-pub use crate::registry::{register, register_codecs, register_containers, CODEC_ID_STR};
+pub use crate::registry::{CODEC_ID_STR, register, register_codecs, register_containers};
 
 #[cfg(feature = "registry")]
 oxideav_core::register!("oxideav-tta", register);

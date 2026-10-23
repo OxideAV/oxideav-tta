@@ -18,8 +18,8 @@ use std::collections::VecDeque;
 use std::io::Read;
 
 use crate::header::{
-    parse_seek_table, parse_stream_header_any_format, skip_id3v2_prefix, FrameDescriptor,
-    StreamHeader,
+    FrameDescriptor, StreamHeader, parse_seek_table, parse_stream_header_any_format,
+    skip_id3v2_prefix,
 };
 
 /// Canonical codec id string for True Audio. `oxideav-meta`'s
@@ -74,7 +74,7 @@ fn make_decoder(params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
         other => {
             return Err(CoreError::unsupported(format!(
                 "oxideav-tta: unsupported output sample format {other:?}"
-            )))
+            )));
         }
     };
     let channels = params
@@ -177,7 +177,7 @@ fn pcm_pack_for_format(samples: &[i32], output_format: SampleFormat) -> CoreResu
         other => {
             return Err(CoreError::unsupported(format!(
                 "oxideav-tta: unsupported output sample format {other:?}"
-            )))
+            )));
         }
     }
     Ok(out)
@@ -280,7 +280,7 @@ impl TtaEncoder {
                         "oxideav-tta encoder: S16 buffer length is not a multiple of 2",
                     ));
                 }
-                for chunk in data.chunks_exact(2) {
+                for chunk in data.as_chunks::<2>().0 {
                     self.interleaved
                         .push(i16::from_le_bytes([chunk[0], chunk[1]]) as i32);
                 }
@@ -291,7 +291,7 @@ impl TtaEncoder {
                         "oxideav-tta encoder: S24 buffer length is not a multiple of 3",
                     ));
                 }
-                for chunk in data.chunks_exact(3) {
+                for chunk in data.as_chunks::<3>().0 {
                     // Sign-extend 24-bit two's-complement little-endian
                     // into i32 (high byte fill).
                     let mut v =
@@ -316,7 +316,7 @@ impl TtaEncoder {
         if self.interleaved.is_empty() {
             return Ok(());
         }
-        if self.interleaved.len() % nch != 0 {
+        if !self.interleaved.len().is_multiple_of(nch) {
             return Err(CoreError::invalid(
                 "oxideav-tta encoder: accumulated PCM not a multiple of channel count",
             ));

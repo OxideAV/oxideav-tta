@@ -427,7 +427,7 @@ fn scan_trailers_finds_id3v1_appended_to_real_tta_file() {
     let mut tta = encode(&samples, 1, 16, 44_100).expect("encode should succeed");
     let eos = tta.len();
     tta.extend_from_slice(b"TAG");
-    tta.extend(std::iter::repeat(0u8).take(125));
+    tta.extend(std::iter::repeat_n(0u8, 125));
     assert_eq!(tta.len(), eos + 128);
 
     // Decode still succeeds end-to-end (the trailer sits past the
@@ -448,7 +448,7 @@ fn scan_trailers_finds_apev2_footer_only() {
     let eos = tta.len();
     // Build an APEv2 footer-only region with a 50-byte body.
     let body_size = 50;
-    tta.extend(std::iter::repeat(0xAAu8).take(body_size));
+    tta.extend(std::iter::repeat_n(0xAAu8, body_size));
     tta.extend_from_slice(b"APETAGEX");
     tta.extend_from_slice(&2000u32.to_le_bytes());
     tta.extend_from_slice(&((body_size + 32) as u32).to_le_bytes());
@@ -468,7 +468,7 @@ fn scan_trailers_finds_both_with_ape_immediately_before_id3v1() {
     let mut tta = encode(&samples, 1, 16, 44_100).expect("encode should succeed");
     let eos = tta.len();
     let body_size = 20;
-    tta.extend(std::iter::repeat(0xAAu8).take(body_size));
+    tta.extend(std::iter::repeat_n(0xAAu8, body_size));
     tta.extend_from_slice(b"APETAGEX");
     tta.extend_from_slice(&2000u32.to_le_bytes());
     tta.extend_from_slice(&((body_size + 32) as u32).to_le_bytes());
@@ -477,7 +477,7 @@ fn scan_trailers_finds_both_with_ape_immediately_before_id3v1() {
     tta.extend_from_slice(&[0u8; 8]);
     let ape_end = tta.len();
     tta.extend_from_slice(b"TAG");
-    tta.extend(std::iter::repeat(0u8).take(125));
+    tta.extend(std::iter::repeat_n(0u8, 125));
 
     let info = crate::scan_trailers(&tta).expect("trailer scan");
     assert_eq!(info.id3v1, Some((ape_end, 128)));
@@ -508,7 +508,7 @@ fn scan_trailers_typed_accessors_match_parser_output() {
 
     // ── APEv2 footer-only region (50-byte body + 32-byte footer). ──
     let body_size = 50;
-    tta.extend(std::iter::repeat(0xAAu8).take(body_size));
+    tta.extend(std::iter::repeat_n(0xAAu8, body_size));
     tta.extend_from_slice(b"APETAGEX");
     tta.extend_from_slice(&2000u32.to_le_bytes());
     tta.extend_from_slice(&((body_size + 32) as u32).to_le_bytes());
@@ -519,7 +519,7 @@ fn scan_trailers_typed_accessors_match_parser_output() {
 
     // ── ID3v1 trailer (128 bytes, 'TAG' magic). ──
     tta.extend_from_slice(b"TAG");
-    tta.extend(std::iter::repeat(0u8).take(125));
+    tta.extend(std::iter::repeat_n(0u8, 125));
     let file_len = tta.len();
 
     let info = crate::scan_trailers(&tta).expect("trailer scan");
