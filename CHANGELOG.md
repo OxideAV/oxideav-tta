@@ -6,6 +6,23 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-tta/compare/v0.0.4...v0.0.5) - 2026-11-07
+
+### Other
+
+- API hygiene: non_exhaustive Error/TrailerInfo
+- edition 2024, MSRV 1.95
+- README examples use the current registry API
+- round-456 profile ledger, external black-box cross-check, format=3 status grounded in the staged spec
+- emit_corpus + decode_file for black-box external cross-checks
+- seek_table (forged entries behind a valid table CRC + unseekable twin) and password_corrupt (format=2 wrong/right/no password + corruption) targets
+- profile drivers time per iteration, report min/median + MiB/s, hash outside the timed loop
+- append frames straight into the caller's buffer + in-place per-slot decorrelation
+- add `geometry` target exploring valid-header/arbitrary-geometry streams
+- reject frames whose declared sample_count can't fit the body
+- bound output preallocation by on-disk length (oversized-header OOM guard)
+- add CI / crates.io / docs.rs / MIT-license badges
+
 ### Changed
 - API hygiene: `Error` and `TrailerInfo` are now `#[non_exhaustive]`. The TTA1 header / seek records (`StreamHeader`, `FrameDescriptor`, `SeekPoint`, `SeekTable`) stay exhaustive (fixed by the format), as do the typed newtypes.
 
