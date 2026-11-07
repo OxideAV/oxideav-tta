@@ -166,7 +166,7 @@ fn check_literal_lift(
     apev2: Option<(usize, usize)>,
     file_len: usize,
 ) {
-    let info = TrailerInfo { id3v1, apev2 };
+    let info = TrailerInfo::default().with_id3v1(id3v1).with_apev2(apev2);
 
     // ID3v1: Ok(Some) iff len==128 and start+len==file_len (no overflow).
     match info.id3v1_typed(file_len) {

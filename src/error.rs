@@ -2,6 +2,7 @@
 
 /// Errors produced by the TTA1 decoder.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// A read or seek did not produce the requested number of bytes.
     Truncated,

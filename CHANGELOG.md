@@ -7,6 +7,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- API hygiene: `Error` and `TrailerInfo` are now `#[non_exhaustive]`. The TTA1 header / seek records (`StreamHeader`, `FrameDescriptor`, `SeekPoint`, `SeekTable`) stay exhaustive (fixed by the format), as do the typed newtypes.
 
 - edition 2024, MSRV 1.95
 - Round-456 (depth mode: profile). **Decode −7..−15%**, byte-identical
@@ -33,6 +34,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   diluted every delta).
 
 ### Added
+- `with_id3v1` / `with_apev2` setters on `TrailerInfo` (already `Default`).
 
 - Fuzz targets `seek_table` (forged seek-table entries behind a valid
   table CRC over an intact encoder stream, plus the stale-CRC

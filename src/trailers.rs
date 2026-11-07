@@ -56,6 +56,7 @@ use crate::error::{Error, Result};
 /// declared tag size). The host application can slice the bytes
 /// directly from `buf[start..start + len]`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TrailerInfo {
     /// Byte range of the ID3v1 trailer (always 128 bytes when
     /// present; `None` if no ID3v1 sits at file end).
@@ -63,6 +64,22 @@ pub struct TrailerInfo {
     /// Byte range of the APEv2 trailer (footer-derived size; `None`
     /// if no APE tag is detected past the last TTA frame).
     pub apev2: Option<(usize, usize)>,
+}
+
+impl TrailerInfo {
+    /// Set `id3v1`.
+    #[must_use]
+    pub fn with_id3v1(mut self, v: Option<(usize, usize)>) -> Self {
+        self.id3v1 = v;
+        self
+    }
+
+    /// Set `apev2`.
+    #[must_use]
+    pub fn with_apev2(mut self, v: Option<(usize, usize)>) -> Self {
+        self.apev2 = v;
+        self
+    }
 }
 
 impl TrailerInfo {

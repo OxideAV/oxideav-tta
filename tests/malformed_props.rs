@@ -176,6 +176,12 @@ fn header_single_bit_flips_never_panic_and_are_rejected() {
                          accessor is invoked on TrailerInfo, not from decode())"
                     );
                 }
+                other => {
+                    panic!(
+                        "header bit flip at byte {byte_idx} bit {bit} \
+                         leaked an unexpected error variant: {other:?}"
+                    );
+                }
             }
         }
     }
